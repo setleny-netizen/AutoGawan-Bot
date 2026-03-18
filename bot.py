@@ -14,7 +14,7 @@ CHAT_ID = -1003847436974  # ID чата
 GAME_BOT_USERNAME = "qalais_bot"  # Username игрового бота (БЕЗ @)
 
 # ============================================
-# САМ БОТ (НИЧЕГО НЕ МЕНЯТЬ!)
+# САМ БОТ
 # ============================================
 
 logging.basicConfig(level=logging.INFO)
@@ -65,44 +65,78 @@ async def cmd_check(message: types.Message):
 
 @dp.message()
 async def handle_all_messages(message: types.Message):
-    """Обрабатываем все сообщения в чате"""
+    """Обрабатываем все сообщения в чате с подробной диагностикой"""
     global last_processed_id, is_checking
     
-    # Если это сообщение от игрового бота с кнопками и оно новое
-    if (message.from_user and 
-        message.from_user.username == GAME_BOT_USERNAME and
-        message.message_id != last_processed_id and
-        message.reply_markup and 
-        message.reply_markup.inline_keyboard):
+    # Пропускаем свои собственные сообщения
+    if message.from_user and message.from_user.id == bot.id:
+        return
+    
+    # Диагностика - логируем ВСЕ сообщения
+    if message.from_user:
+        username = message.from_user.username or "нет username"
+        name = message.from_user.first_name or ""
+        user_id = message.from_user.id
+        has_buttons = "✅ ЕСТЬ КНОПКИ" if (message.reply_markup and message.reply_markup.inline_keyboard) else "❌ нет кнопок"
         
-        logging.info(f"✅ Поймал сообщение от игрового бота в реальном времени!")
-        last_processed_id = message.message_id
+        logging.info(f"📨 [ID:{user_id}] @{username} ({name}): '{message.text or '[не текст]'}' - {has_buttons}")
         
-        # Запускаем обработку если не заняты
-        if not is_checking:
-            asyncio.create_task(click_buttons(message))
+        # Специальная проверка для игрового бота
+        if username == GAME_BOT_USERNAME:
+            logging.info(f"🎯👉 ЭТО СООБЩЕНИЕ ОТ ИГРОВОГО БОТА! 👈🎯")
+            
+            if message.reply_markup and message.reply_markup.inline_keyboard:
+                logging.info(f"✅ И У НЕГО ЕСТЬ КНОПКИ! 🎉")
+                
+                # Показываем все кнопки
+                for i, row in enumerate(message.reply_markup.inline_keyboard):
+                    for j, btn in enumerate(row):
+                        logging.info(f"   🔘 Кнопка [{i},{j}]: '{btn.text}' (callback: {btn.callback_data})")
+                
+                # Проверяем ID сообщения
+                if message.message_id != last_processed_id:
+                    logging.info(f"✅ Новое сообщение! ID {message.message_id} ≠ {last_processed_id}")
+                    last_processed_id = message.message_id
+                    
+                    if not is_checking:
+                        logging.info(f"🚀 ЗАПУСКАЮ НАЖАТИЕ КНОПОК! 🚀")
+                        asyncio.create_task(click_buttons(message))
+                    else:
+                        logging.info(f"⏳ Уже идет проверка, ждем...")
+                else:
+                    logging.info(f"⏭ Сообщение уже обработано (ID {message.message_id} = {last_processed_id})")
+            else:
+                logging.info(f"❌ У сообщения НЕТ кнопок!")
 
 async def click_buttons(game_message):
     """Нажимает кнопки в полученном сообщении"""
     global is_checking
     
     if is_checking:
+        logging.info("⏳ Уже кликаю, пропускаю...")
         return
     
     try:
         is_checking = True
+        logging.info("🎯 НАЧИНАЮ ПРОЦЕСС НАЖАТИЯ КНОПОК")
         
         # Показываем все кнопки
         logging.info("🔘 Доступные кнопки:")
+        all_buttons = []
         for i, row in enumerate(game_message.reply_markup.inline_keyboard):
             for j, btn in enumerate(row):
-                logging.info(f"   Кнопка [{i},{j}]: '{btn.text}'")
+                btn_info = f"'{btn.text}'"
+                all_buttons.append(btn.text.lower())
+                logging.info(f"   Кнопка [{i},{j}]: {btn_info}")
+        
+        logging.info(f"📋 Все кнопки: {all_buttons}")
         
         # ===== 1. НАЖИМАЕМ СКЛАД =====
         clicked = False
         for row in game_message.reply_markup.inline_keyboard:
             for btn in row:
                 if "склад" in btn.text.lower():
+                    logging.info(f"👉 Нашел кнопку СКЛАД: '{btn.text}'")
                     await game_message.click(btn.callback_data)
                     logging.info(f"✅ [1/3] Нажал: {btn.text}")
                     clicked = True
@@ -111,21 +145,23 @@ async def click_buttons(game_message):
                 break
         
         if not clicked:
-            logging.warning("❌ Не нашел кнопку 'Склад'")
+            logging.warning("❌ Не нашел кнопку 'Склад' среди кнопок!")
+            # Покажем, какие кнопки искали
+            logging.warning(f"🔍 Искал 'склад' в кнопках: {all_buttons}")
             return
         
         # Пауза 3 секунды
+        logging.info("⏱ Жду 3 секунды перед следующим действием...")
         await asyncio.sleep(3)
         
-        # ===== 2. НАЖИМАЕМ ПРОДАТЬ =====
-        # Здесь мы уже не ищем новые сообщения, а ждем
-        # что игровой бот пришлет следующее сообщение само
-        logging.info("⏱ Жду следующее сообщение от игрового бота...")
+        # Сбрасываем флаг, чтобы следующее сообщение тоже обработалось
+        logging.info("✅ Первый шаг завершен, жду следующее сообщение")
         
     except Exception as e:
-        logging.error(f"❌ Ошибка: {e}")
+        logging.error(f"❌ Ошибка при нажатии: {e}")
     finally:
         is_checking = False
+        logging.info("🔄 Флаг is_checking сброшен, готов к новым сообщениям")
 
 async def check_for_buttons():
     """Проверяет новые кнопки (резервный метод)"""
@@ -137,9 +173,6 @@ async def check_for_buttons():
     try:
         is_checking = True
         logging.info(f"🔍 Плановая проверка в {datetime.now()}")
-        
-        # В aiogram 3.x нет прямого метода для получения истории
-        # Поэтому полагаемся на хендлер сообщений выше
         logging.info("Ожидаю новые сообщения через хендлер...")
         
     except Exception as e:
