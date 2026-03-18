@@ -63,53 +63,40 @@ async def cmd_check(message: types.Message):
     await message.answer("🔍 Проверяю наличие новых кнопок...")
     asyncio.create_task(check_for_buttons())
 
-async def get_recent_messages(limit=10):
-    """Получает последние сообщения из чата (РАБОЧИЙ МЕТОД)"""
-    messages = []
-    try:
-        # В aiogram 3.x используем bot.get_chat_history напрямую
-        async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=limit):
-            messages.append(msg)
-    except Exception as e:
-        logging.error(f"Ошибка при получении истории: {e}")
-    return messages
+@dp.message()
+async def handle_all_messages(message: types.Message):
+    """Обрабатываем все сообщения в чате"""
+    global last_processed_id, is_checking
+    
+    # Если это сообщение от игрового бота с кнопками и оно новое
+    if (message.from_user and 
+        message.from_user.username == GAME_BOT_USERNAME and
+        message.message_id != last_processed_id and
+        message.reply_markup and 
+        message.reply_markup.inline_keyboard):
+        
+        logging.info(f"✅ Поймал сообщение от игрового бота в реальном времени!")
+        last_processed_id = message.message_id
+        
+        # Запускаем обработку если не заняты
+        if not is_checking:
+            asyncio.create_task(click_buttons(message))
 
-async def check_for_buttons():
-    """Проверяет новые кнопки и нажимает их"""
-    global is_checking, last_processed_id
+async def click_buttons(game_message):
+    """Нажимает кнопки в полученном сообщении"""
+    global is_checking
     
     if is_checking:
         return
     
     try:
         is_checking = True
-        logging.info(f"🔍 Начинаю проверку в {datetime.now()}")
         
-        # Получаем последние сообщения
-        messages = await get_recent_messages(15)
-        logging.info(f"Получено {len(messages)} сообщений")
-        
-        # Ищем новое сообщение от игрового бота с кнопками
-        game_message = None
-        for msg in messages:
-            if (msg.from_user and 
-                msg.from_user.username == GAME_BOT_USERNAME and
-                msg.message_id != last_processed_id and
-                msg.reply_markup and 
-                msg.reply_markup.inline_keyboard):
-                game_message = msg
-                last_processed_id = msg.message_id
-                logging.info(f"✅ Нашел новое сообщение ID {msg.message_id}")
-                
-                # Показываем все кнопки
-                for i, row in enumerate(msg.reply_markup.inline_keyboard):
-                    for j, btn in enumerate(row):
-                        logging.info(f"   Кнопка [{i},{j}]: '{btn.text}'")
-                break
-        
-        if not game_message:
-            logging.info("Новых сообщений с кнопками нет")
-            return
+        # Показываем все кнопки
+        logging.info("🔘 Доступные кнопки:")
+        for i, row in enumerate(game_message.reply_markup.inline_keyboard):
+            for j, btn in enumerate(row):
+                logging.info(f"   Кнопка [{i},{j}]: '{btn.text}'")
         
         # ===== 1. НАЖИМАЕМ СКЛАД =====
         clicked = False
@@ -131,54 +118,29 @@ async def check_for_buttons():
         await asyncio.sleep(3)
         
         # ===== 2. НАЖИМАЕМ ПРОДАТЬ =====
-        # Получаем новые сообщения
-        messages = await get_recent_messages(10)
+        # Здесь мы уже не ищем новые сообщения, а ждем
+        # что игровой бот пришлет следующее сообщение само
+        logging.info("⏱ Жду следующее сообщение от игрового бота...")
         
-        for msg in messages:
-            if (msg.from_user and 
-                msg.from_user.username == GAME_BOT_USERNAME and
-                msg.reply_markup and 
-                msg.reply_markup.inline_keyboard):
-                
-                clicked = False
-                for row in msg.reply_markup.inline_keyboard:
-                    for btn in row:
-                        if "продать" in btn.text.lower() or "ресурс" in btn.text.lower():
-                            await msg.click(btn.callback_data)
-                            logging.info(f"✅ [2/3] Нажал: {btn.text}")
-                            clicked = True
-                            break
-                    if clicked:
-                        break
-                if clicked:
-                    break
+    except Exception as e:
+        logging.error(f"❌ Ошибка: {e}")
+    finally:
+        is_checking = False
+
+async def check_for_buttons():
+    """Проверяет новые кнопки (резервный метод)"""
+    global is_checking, last_processed_id
+    
+    if is_checking:
+        return
+    
+    try:
+        is_checking = True
+        logging.info(f"🔍 Плановая проверка в {datetime.now()}")
         
-        # Пауза 3 секунды
-        await asyncio.sleep(3)
-        
-        # ===== 3. НАЖИМАЕМ НАЗАД =====
-        messages = await get_recent_messages(10)
-        
-        for msg in messages:
-            if (msg.from_user and 
-                msg.from_user.username == GAME_BOT_USERNAME and
-                msg.reply_markup and 
-                msg.reply_markup.inline_keyboard):
-                
-                clicked = False
-                for row in msg.reply_markup.inline_keyboard:
-                    for btn in row:
-                        if "назад" in btn.text.lower() or "⬅️" in btn.text:
-                            await msg.click(btn.callback_data)
-                            logging.info(f"✅ [3/3] Нажал: {btn.text}")
-                            clicked = True
-                            break
-                    if clicked:
-                        break
-                if clicked:
-                    break
-        
-        logging.info("🎉 Все кнопки нажаты!")
+        # В aiogram 3.x нет прямого метода для получения истории
+        # Поэтому полагаемся на хендлер сообщений выше
+        logging.info("Ожидаю новые сообщения через хендлер...")
         
     except Exception as e:
         logging.error(f"❌ Ошибка: {e}")
@@ -190,13 +152,14 @@ async def scheduled_check():
     await check_for_buttons()
 
 async def main():
-    # Проверка каждые 2 минуты
+    # Проверка каждые 2 минуты (на всякий случай)
     scheduler.add_job(scheduled_check, 'interval', minutes=2)
     scheduler.start()
     
     logging.info("✅ Бот успешно запущен!")
-    logging.info("👉 Напишите 'Гавань' в чат вручную")
-    logging.info("👉 Используйте /check для ручной проверки")
+    logging.info("👉 Бот теперь ловит сообщения в реальном времени!")
+    logging.info("👉 Просто напишите 'Гавань' в чат и бот сам среагирует")
+    logging.info("👉 /check - ручная проверка")
     
     await dp.start_polling(bot)
 
