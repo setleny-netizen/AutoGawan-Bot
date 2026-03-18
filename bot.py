@@ -10,130 +10,110 @@ from datetime import datetime
 # НАСТРОЙКА (ТОЛЬКО ЭТО МЕНЯЕМ!)
 # ============================================
 
-# Токен вашего бота (от @BotFather)
-BOT_TOKEN = "8742043015:AAF4EBWameQbc_qTZGlU347-A-R7shrK5GI"
-
-# ID чата, где сидят боты (с минусом в начале)
-CHAT_ID = -1003847436974
-
-# Username игрового бота (БЕЗ @)
-GAME_BOT_USERNAME = "qalais_bot"
+BOT_TOKEN = "8742043015:AAF4EBWameQbc_qTZGlU347-A-R7shrK5GI"  # Ваш токен
+CHAT_ID = -1003847436974  # ID чата
+GAME_BOT_USERNAME = "qalais_bot"  # Username игрового бота (БЕЗ @)
 
 # ============================================
-# САМ БОТ (НИЧЕГО НЕ МЕНЯТЬ!)
+# САМ БОТ
 # ============================================
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
-
-# Создаем объекты бота и диспетчера
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 scheduler = AsyncIOScheduler()
 
-# Флаг, чтобы не запускать несколько кликов одновременно
-is_clicking = False
+# Храним ID последнего обработанного сообщения, чтобы не нажимать дважды
+last_processed_message_id = None
+is_checking = False
 
 @dp.message(Command('start'))
 async def cmd_start(message: types.Message):
-    """Команда /start - проверка что бот работает"""
     await message.answer(
-        "✅ Бот запущен и работает!\n"
-        "Каждые 30 минут я буду:\n"
-        "1. Писать 'Гавань'\n"
-        "2. Нажимать 'Склад'\n"
-        "3. Нажимать 'Продать ресурсы'\n\n"
-        "Команды:\n"
+        "✅ Бот запущен в режиме ожидания!\n\n"
+        "🔹 **Как это работает:**\n"
+        "1. Вы пишете в чат 'Гавань' (вручную)\n"
+        "2. Я автоматически нажму все нужные кнопки\n\n"
+        "🔹 **Последовательность:**\n"
+        "   • 🏝️ Склад\n"
+        "   • 🛒 Продать ресурсы\n"
+        "   • ⬅️ Назад\n"
+        "   (пауза 3 секунды между нажатиями)\n\n"
+        "🔹 **Команды:**\n"
         "/status - проверить статус\n"
-        "/click_now - запустить цикл сейчас"
+        "/check_now - принудительно проверить кнопки"
     )
 
 @dp.message(Command('status'))
 async def cmd_status(message: types.Message):
-    """Команда /status - проверка статуса"""
     await message.answer(
         f"📊 Статус:\n"
         f"• Чат ID: {CHAT_ID}\n"
         f"• Игровой бот: @{GAME_BOT_USERNAME}\n"
-        f"• Сейчас кликаем: {'да' if is_clicking else 'нет'}\n"
-        f"• Следующий клик по расписанию"
+        f"• Последний обработанный ID: {last_processed_message_id}\n"
+        f"• Сейчас проверяю: {'да' if is_checking else 'нет'}"
     )
 
-@dp.message(Command('click_now'))
-async def cmd_click_now(message: types.Message):
-    """Команда /click_now - запустить цикл вручную"""
-    global is_clicking
-    if is_clicking:
-        await message.answer("Уже выполняется клик, подождите...")
+@dp.message(Command('check_now'))
+async def cmd_check_now(message: types.Message):
+    """Принудительная проверка новых кнопок"""
+    global is_checking
+    if is_checking:
+        await message.answer("Уже идет проверка, подождите...")
         return
     
-    await message.answer("🔄 Запускаю цикл...")
-    asyncio.create_task(click_cycle())
+    await message.answer("🔍 Проверяю наличие новых кнопок...")
+    asyncio.create_task(check_for_buttons())
 
-async def click_cycle():
-    """Главная функция: отправка Гавань и нажатие кнопок"""
-    global is_clicking
+async def check_for_buttons():
+    """Проверяет, появились ли новые кнопки от игрового бота"""
+    global is_checking, last_processed_message_id
     
-    # Если уже кликаем - выходим
-    if is_clicking:
+    if is_checking:
         return
     
     try:
-        is_clicking = True
-        logging.info(f"Начинаю цикл в {datetime.now()}")
+        is_checking = True
+        logging.info(f"🔍 Проверяю новые сообщения в {datetime.now()}")
         
-        # ===== ШАГ 1: Отправляем "Гавань" =====
-        await bot.send_message(chat_id=CHAT_ID, text="Гавань")
-        logging.info("✅ Отправил 'Гавань'")
-        
-        # ===== ВРЕМЕННАЯ ДИАГНОСТИКА =====
-        logging.info("🔍 ДИАГНОСТИКА: Смотрю, кто писал в чат последним...")
-        async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=10):
-            if msg.from_user:
-                username = msg.from_user.username or "нет username"
-                name = msg.from_user.first_name or ""
-                logging.info(f"   📨 От @{username} ({name}): {msg.text[:50] if msg.text else 'не текст'}")
-                if msg.reply_markup and msg.reply_markup.inline_keyboard:
-                    logging.info(f"      🔘 Есть инлайн-кнопки!")
-        logging.info("🔍 ДИАГНОСТИКА ЗАВЕРШЕНА")
-        # ===== КОНЕЦ ДИАГНОСТИКИ =====
-        
-        # Ждем 3 секунды, чтобы игровой бот ответил
-        await asyncio.sleep(3)
-        
-        # ===== ШАГ 2: Ищем ответ от игрового бота =====
+        # Получаем последние сообщения из чата
         messages = []
-        async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=5):
+        async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=10):
             messages.append(msg)
         
-        # Ищем сообщение от игрового бота с кнопками
+        # Ищем новое сообщение от игрового бота с кнопками
         game_message = None
         for msg in messages:
+            # Проверяем, что это сообщение от игрового бота и оно еще не обработано
             if (msg.from_user and 
                 msg.from_user.username == GAME_BOT_USERNAME and 
+                msg.message_id != last_processed_message_id and
                 msg.reply_markup and 
                 msg.reply_markup.inline_keyboard):
                 game_message = msg
-                logging.info(f"✅ Нашел сообщение от игрового бота!")
+                logging.info(f"✅ Нашел НОВОЕ сообщение от игрового бота (ID: {msg.message_id})")
                 break
         
         if not game_message:
-            logging.warning("❌ Не нашел сообщение от игрового бота с кнопками")
+            logging.info("Новых сообщений с кнопками нет")
             return
         
+        # Запоминаем ID обработанного сообщения
+        last_processed_message_id = game_message.message_id
+        
         # Показываем все найденные кнопки
-        logging.info("🔘 Доступные кнопки:")
+        logging.info("🔘 Доступные кнопки в первом сообщении:")
         for i, row in enumerate(game_message.reply_markup.inline_keyboard):
             for j, button in enumerate(row):
                 logging.info(f"   Кнопка [{i},{j}]: '{button.text}'")
         
-        # ===== ШАГ 3: Ищем и нажимаем кнопку "Склад" =====
+        # ===== 1. НАЖИМАЕМ КНОПКУ "СКЛАД" =====
         found_sklad = False
         for row in game_message.reply_markup.inline_keyboard:
             for button in row:
                 if "склад" in button.text.lower():
                     await game_message.click(button.callback_data)
-                    logging.info(f"✅ Нажал кнопку: {button.text}")
+                    logging.info(f"✅ [1/3] Нажал кнопку: {button.text}")
                     found_sklad = True
                     break
             if found_sklad:
@@ -143,15 +123,16 @@ async def click_cycle():
             logging.warning("❌ Не нашел кнопку 'Склад'")
             return
         
-        # Ждем, пока обновится сообщение
-        await asyncio.sleep(2)
+        # Пауза 3 секунды
+        logging.info("⏱ Жду 3 секунды...")
+        await asyncio.sleep(3)
         
-        # ===== ШАГ 4: Ищем новое сообщение с кнопкой продажи =====
+        # Получаем свежие сообщения после нажатия
         messages = []
         async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=5):
             messages.append(msg)
         
-        # Ищем новое сообщение от игрового бота
+        # Ищем новое сообщение от игрового бота с кнопкой продажи
         game_message = None
         for msg in messages:
             if (msg.from_user and 
@@ -159,7 +140,7 @@ async def click_cycle():
                 msg.reply_markup and 
                 msg.reply_markup.inline_keyboard):
                 game_message = msg
-                logging.info(f"✅ Нашел новое сообщение от игрового бота!")
+                logging.info(f"✅ Нашел следующее сообщение от игрового бота")
                 break
         
         if not game_message:
@@ -167,18 +148,18 @@ async def click_cycle():
             return
         
         # Показываем кнопки в новом сообщении
-        logging.info("🔘 Кнопки в новом сообщении:")
+        logging.info("🔘 Кнопки во втором сообщении:")
         for i, row in enumerate(game_message.reply_markup.inline_keyboard):
             for j, button in enumerate(row):
                 logging.info(f"   Кнопка [{i},{j}]: '{button.text}'")
         
-        # ===== ШАГ 5: Ищем и нажимаем кнопку "Продать ресурсы" =====
+        # ===== 2. НАЖИМАЕМ КНОПКУ "ПРОДАТЬ РЕСУРСЫ" =====
         found_sell = False
         for row in game_message.reply_markup.inline_keyboard:
             for button in row:
                 if "продать" in button.text.lower() or "ресурс" in button.text.lower():
                     await game_message.click(button.callback_data)
-                    logging.info(f"✅ Нажал кнопку: {button.text}")
+                    logging.info(f"✅ [2/3] Нажал кнопку: {button.text}")
                     found_sell = True
                     break
             if found_sell:
@@ -188,32 +169,77 @@ async def click_cycle():
             logging.warning("❌ Не нашел кнопку продажи")
             return
         
-        logging.info("✅ ЦИКЛ УСПЕШНО ЗАВЕРШЕН!")
+        # Пауза 3 секунды
+        logging.info("⏱ Жду 3 секунды...")
+        await asyncio.sleep(3)
+        
+        # Получаем свежие сообщения после продажи
+        messages = []
+        async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=5):
+            messages.append(msg)
+        
+        # Ищем сообщение с кнопкой "Назад"
+        game_message = None
+        for msg in messages:
+            if (msg.from_user and 
+                msg.from_user.username == GAME_BOT_USERNAME and 
+                msg.reply_markup and 
+                msg.reply_markup.inline_keyboard):
+                game_message = msg
+                logging.info(f"✅ Нашел сообщение с кнопкой назад")
+                break
+        
+        if not game_message:
+            logging.warning("❌ Не нашел сообщение с кнопкой назад")
+            return
+        
+        # Показываем кнопки
+        logging.info("🔘 Кнопки в финальном сообщении:")
+        for i, row in enumerate(game_message.reply_markup.inline_keyboard):
+            for j, button in enumerate(row):
+                logging.info(f"   Кнопка [{i},{j}]: '{button.text}'")
+        
+        # ===== 3. НАЖИМАЕМ КНОПКУ "НАЗАД" =====
+        found_back = False
+        for row in game_message.reply_markup.inline_keyboard:
+            for button in row:
+                if "назад" in button.text.lower() or "⬅️" in button.text:
+                    await game_message.click(button.callback_data)
+                    logging.info(f"✅ [3/3] Нажал кнопку: {button.text}")
+                    found_back = True
+                    break
+            if found_back:
+                break
+        
+        if not found_back:
+            logging.warning("❌ Не нашел кнопку 'Назад'")
+            return
+        
+        logging.info("🎉 ВСЕ ТРИ КНОПКИ УСПЕШНО НАЖАТЫ!")
         
     except Exception as e:
         logging.error(f"❌ Ошибка: {e}")
     finally:
-        is_clicking = False
+        is_checking = False
 
-async def scheduled_click():
-    """Функция для запуска по расписанию"""
-    await click_cycle()
+async def scheduled_check():
+    """Запуск проверки по расписанию (каждые 2 минуты)"""
+    await check_for_buttons()
 
 async def main():
-    """Запуск бота"""
-    
-    # Добавляем задачу в расписание - каждые 30 минут
+    # Проверяем новые кнопки каждые 2 минуты
     scheduler.add_job(
-        scheduled_click, 
+        scheduled_check, 
         'interval', 
-        minutes=30, 
-        id='game_clicker',
+        minutes=2,  # Проверяем каждые 2 минуты, появились ли новые кнопки
+        id='button_checker',
         next_run_time=datetime.now()
     )
     scheduler.start()
-    logging.info("✅ Расписание запущено: каждые 30 минут")
+    logging.info("✅ Режим ожидания запущен: проверяю новые кнопки каждые 2 минуты")
+    logging.info("👉 Напишите 'Гавань' в чат вручную, а я нажму кнопки!")
+    logging.info("👉 Последовательность: Склад → Продать → Назад (с паузой 3 сек)")
     
-    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
