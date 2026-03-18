@@ -76,14 +76,41 @@ async def check_for_buttons():
         is_checking = True
         logging.info(f"🔍 Проверяю новые сообщения в {datetime.now()}")
         
-        # Получаем последние сообщения из чата
-        messages = []
-        async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=10):
-            messages.append(msg)
+        # ===== ЖЕСТКАЯ ДИАГНОСТИКА =====
+        logging.info("🔴🔴🔴 ЖЕСТКАЯ ДИАГНОСТИКА 🔴🔴🔴")
+        logging.info(f"Проверяю чат {CHAT_ID}, ищу @{GAME_BOT_USERNAME}")
+        
+        # Получаем последние сообщения из чата (ПРАВИЛЬНЫЙ СПОСОБ)
+        all_msgs = []
+        async for msg in bot.iter_chat_messages(chat_id=CHAT_ID, max_id=999999999):
+            all_msgs.append(msg)
+            if len(all_msgs) >= 20:
+                break
+        
+        logging.info(f"Всего получил {len(all_msgs)} сообщений")
+        
+        for i, msg in enumerate(all_msgs):
+            if msg.from_user:
+                uname = msg.from_user.username or "НЕТ USERNAME"
+                name = msg.from_user.first_name or ""
+                text = msg.text or "[не текст]"
+                has_buttons = "ДА" if (msg.reply_markup and msg.reply_markup.inline_keyboard) else "НЕТ"
+                
+                logging.info(f"[{i}] От @{uname} ({name}): {text[:50]}")
+                logging.info(f"    Есть кнопки: {has_buttons}")
+                
+                if msg.reply_markup and msg.reply_markup.inline_keyboard:
+                    for ri, row in enumerate(msg.reply_markup.inline_keyboard):
+                        for ci, btn in enumerate(row):
+                            logging.info(f"    Кнопка [{ri},{ci}]: '{btn.text}'")
+            await asyncio.sleep(0.1)
+        
+        logging.info("🔴🔴🔴 ДИАГНОСТИКА ЗАВЕРШЕНА 🔴🔴🔴")
+        # ===== КОНЕЦ ДИАГНОСТИКИ =====
         
         # Ищем новое сообщение от игрового бота с кнопками
         game_message = None
-        for msg in messages:
+        for msg in all_msgs:
             # Проверяем, что это сообщение от игрового бота и оно еще не обработано
             if (msg.from_user and 
                 msg.from_user.username == GAME_BOT_USERNAME and 
@@ -127,14 +154,16 @@ async def check_for_buttons():
         logging.info("⏱ Жду 3 секунды...")
         await asyncio.sleep(3)
         
-        # Получаем свежие сообщения после нажатия
-        messages = []
-        async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=5):
-            messages.append(msg)
+        # Получаем свежие сообщения после нажатия (ПРАВИЛЬНЫЙ СПОСОБ)
+        msgs_after = []
+        async for msg in bot.iter_chat_messages(chat_id=CHAT_ID, max_id=999999999):
+            msgs_after.append(msg)
+            if len(msgs_after) >= 10:
+                break
         
         # Ищем новое сообщение от игрового бота с кнопкой продажи
         game_message = None
-        for msg in messages:
+        for msg in msgs_after:
             if (msg.from_user and 
                 msg.from_user.username == GAME_BOT_USERNAME and 
                 msg.reply_markup and 
@@ -173,14 +202,16 @@ async def check_for_buttons():
         logging.info("⏱ Жду 3 секунды...")
         await asyncio.sleep(3)
         
-        # Получаем свежие сообщения после продажи
-        messages = []
-        async for msg in bot.get_chat_history(chat_id=CHAT_ID, limit=5):
-            messages.append(msg)
+        # Получаем свежие сообщения после продажи (ПРАВИЛЬНЫЙ СПОСОБ)
+        msgs_final = []
+        async for msg in bot.iter_chat_messages(chat_id=CHAT_ID, max_id=999999999):
+            msgs_final.append(msg)
+            if len(msgs_final) >= 10:
+                break
         
         # Ищем сообщение с кнопкой "Назад"
         game_message = None
-        for msg in messages:
+        for msg in msgs_final:
             if (msg.from_user and 
                 msg.from_user.username == GAME_BOT_USERNAME and 
                 msg.reply_markup and 
@@ -231,7 +262,7 @@ async def main():
     scheduler.add_job(
         scheduled_check, 
         'interval', 
-        minutes=2,  # Проверяем каждые 2 минуты, появились ли новые кнопки
+        minutes=2,
         id='button_checker',
         next_run_time=datetime.now()
     )
