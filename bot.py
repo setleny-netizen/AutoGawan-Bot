@@ -14,7 +14,7 @@ from datetime import datetime
 BOT_TOKEN = "8742043015:AAF4EBWameQbc_qTZGlU347-A-R7shrK5GI"  # ЗАМЕНИТЕ НА СВОЙ
 
 # ID чата, где сидят боты (вы получили от @getmyid_bot)
-CHAT_ID = -8742043015  # ЗАМЕНИТЕ НА СВОЙ (скорее всего отрицательное число)
+CHAT_ID = -1003847436974  # ЗАМЕНИТЕ НА СВОЙ (скорее всего отрицательное число)
 
 # Username игрового бота (без @) - например "game_bot"
 GAME_BOT_USERNAME = "qalais_bot"  # ЗАМЕНИТЕ НА username бота-игры
