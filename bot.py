@@ -2,6 +2,7 @@
 """
 Telegram юзербот для автоматической игры в шахту
 Использует библиотеку Telethon
+Отвечает на команды только в указанном чате
 """
 
 import asyncio
@@ -278,7 +279,7 @@ class MiningBot:
         return True
 
     async def setup_handlers(self):
-        """Setup command handlers - рабочий вариант"""
+        """Setup command handlers - отвечает ТОЛЬКО в указанном чате"""
 
         @self.client.on(events.NewMessage)
         async def command_handler(event):
@@ -290,13 +291,19 @@ class MiningBot:
             if not event.message.text.startswith('/'):
                 return
 
+            # Проверяем, что сообщение из нужного чата
+            if event.chat_id != self.chat_id:
+                # Игнорируем команды из других чатов
+                logger.debug(f"Ignoring command from wrong chat: {event.chat_id}")
+                return
+
             command = event.message.text.lower().strip()
-            logger.info(f"Received command: {command} from {event.sender_id}")
+            logger.info(f"Received command: {command} from {event.sender_id} in chat {event.chat_id}")
 
             # Обработка команд
             if command == '/start':
                 success = await self.start_game()
-                response = "✅ Game started! Mining 💎 first, then 🪨 every 5 minutes." if success else "⚠️ Game already running!"
+                response = "✅ Game started! Mining 💎 first, then 🪨 every 2 minutes." if success else "⚠️ Game already running!"
                 await event.reply(response)
 
             elif command == '/stop':
@@ -316,6 +323,7 @@ class MiningBot:
 
             logger.info("=" * 50)
             logger.info("Bot ready! Use /start to begin mining.")
+            logger.info(f"Bot will respond ONLY in chat: {self.chat_id}")
             logger.info("Commands: /start, /stop, /status")
             logger.info("=" * 50)
 
