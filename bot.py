@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 Универсальный Telegram юзербот
-Управление: шахта, рыбалка, работа
+Управление: шахта, рыбалка, работа, ранчо (поиск семян)
 Команды:
-  шах /shaft    - запустить шахту
-  сшах /sshaft  - остановить шахту
-  рыб /fishing  - запустить рыбалку
+  шах /shaft     - запустить шахту
+  сшах /sshaft   - остановить шахту
+  рыб /fishing   - запустить рыбалку
   срыб /sfishing - остановить рыбалку
-  раб /work     - запустить работу
-  сраб /swork   - остановить работу
-  стат /status  - показать статус
+  раб /work      - запустить работу
+  сраб /swork    - остановить работу
+  поле /field    - запустить поиск семян
+  споле /sfield  - остановить поиск семян
+  стат /status   - показать статус
 """
 
 import asyncio
@@ -20,7 +22,6 @@ import random
 import re
 import os
 from typing import Optional, Tuple
-from datetime import datetime
 
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
@@ -43,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 class UniversalBot:
-    """Универсальный бот для шахты, рыбалки и работы"""
+    """Универсальный бот для шахты, рыбалки, работы и ранчо"""
 
     def __init__(self):
         # Создаем клиент с единой сессией
@@ -59,20 +60,24 @@ class UniversalBot:
         self.shaft_running = False
         self.fishing_running = False
         self.work_running = False
+        self.field_running = False
 
         # Задачи активностей
         self.shaft_task: Optional[asyncio.Task] = None
         self.fishing_task: Optional[asyncio.Task] = None
         self.work_task: Optional[asyncio.Task] = None
+        self.field_task: Optional[asyncio.Task] = None
 
         # Статистика
         self.bot_start_time = None
         self.shaft_stats = {'cycles': 0, 'start_time': None, 'next_time': None, 'last_duration': 0}
         self.fishing_stats = {'cycles': 0, 'start_time': None, 'next_time': None, 'last_duration': 0}
         self.work_stats = {'cycles': 0, 'start_time': None, 'next_time': None, 'last_duration': 0}
+        self.field_stats = {'cycles': 0, 'start_time': None, 'next_time': None, 'last_duration': 0}
 
         # Общие настройки
         self.chat_id = int(config.CHAT_ID) if str(config.CHAT_ID).lstrip('-').isdigit() else config.CHAT_ID
+        self.game_bot_id = config.GAME_BOT_ID  # ID игрового бота для ранчо
 
         # Настройки шахты
         self.shaft_interval = config.SHAFT_INTERVAL
@@ -95,6 +100,17 @@ class UniversalBot:
         self.work_interval = config.WORK_INTERVAL
         self.work_timeout = config.WORK_TIMEOUT
         self.work_click_delay = config.WORK_CLICK_DELAY
+
+        # Настройки ранчо (поиск семян)
+        self.field_interval = config.FIELD_INTERVAL
+        self.field_timeout = config.FIELD_TIMEOUT
+        self.field_click_delay = config.FIELD_CLICK_DELAY
+        # Эмодзи для семян (овощи, фрукты, ягоды)
+        self.seed_emojis = [
+            '🧅', '🍅', '🥬', '🥕', '🌽', '🥒', '🍆', '🫑', '🥔', '🍠',
+            '🍓', '🫐', '🍇', '🍉', '🍊', '🍋', '🍎', '🍐', '🍑', '🍒',
+            '🥝', '🥥', '🌶️', '🧄', '🫒', '🥦', '🌻', '🌾', '🍄', '🌿'
+        ]
 
         logger.info("Универсальный бот инициализирован")
 
@@ -120,12 +136,14 @@ class UniversalBot:
             logger.error(f"Ошибка запуска клиента: {e}")
             raise
 
-    async def get_message_with_buttons(self, after_id: int = 0, exclude_self: bool = True) -> Optional[Message]:
+    async def get_message_with_buttons(self, after_id: int = 0, exclude_self: bool = True,
+                                       use_game_bot: bool = False) -> Optional[Message]:
         """Получить сообщение с кнопками"""
         try:
             me = await self.client.get_me() if exclude_self else None
+            chat_id = self.game_bot_id if use_game_bot else self.chat_id
 
-            async for message in self.client.iter_messages(self.chat_id, limit=10):
+            async for message in self.client.iter_messages(chat_id, limit=10):
                 if message.id <= after_id:
                     continue
                 if exclude_self and message.sender_id == me.id:
@@ -169,7 +187,7 @@ class UniversalBot:
                 return False
 
             await message.click(button_index)
-            await asyncio.sleep(3)
+            await asyncio.sleep(10)
             return True
 
         except Exception as e:
@@ -532,6 +550,220 @@ class UniversalBot:
                 logger.error(f"[РАБОТА] Ошибка: {e}")
                 await asyncio.sleep(self.work_interval)
 
+    # ==================== МЕТОДЫ РАНЧО (ПОИСК СЕМЯН) ====================
+
+    async def field_send_message(self) -> Optional[Message]:
+        """Отправка сообщения 'Ранчо' в ЛС с игровым ботом"""
+        try:
+            message = await self.client.send_message(self.game_bot_id, "Ранчо")
+            logger.info("[РАНЧО] Сообщение 'Ранчо' отправлено в ЛС")
+            return message
+        except Exception as e:
+            logger.error(f"[РАНЧО] Ошибка отправки: {e}")
+            return None
+
+    async def field_click_button(self, message: Message, target_text: str) -> bool:
+        """Нажать кнопку по тексту"""
+        try:
+            if not message or not message.reply_markup:
+                return False
+
+            buttons = []
+            for row in message.buttons:
+                for btn in row:
+                    buttons.append(btn)
+
+            button_texts = [btn.text for btn in buttons if hasattr(btn, 'text')]
+            logger.info(f"[РАНЧО] Доступные кнопки: {button_texts}")
+
+            for idx, btn in enumerate(buttons):
+                if hasattr(btn, 'text') and btn.text:
+                    btn_lower = btn.text.lower()
+                    if "поле" in btn_lower or "поиск семян" in btn_lower:
+                        logger.info(f"[РАНЧО] Найдена кнопка: {btn.text} (индекс {idx})")
+                        await message.click(idx)
+                        await asyncio.sleep(2)
+                        return True
+
+            logger.warning(f"[РАНЧО] Кнопка с текстом '{target_text}' не найдена")
+            return False
+        except Exception as e:
+            logger.error(f"[РАНЧО] Ошибка нажатия кнопки: {e}")
+            return False
+
+    async def field_wait_for_message_update(self, message_id: int, timeout: int = 30, check_text: str = None) -> \
+    Optional[Message]:
+        """Ожидать обновления сообщения"""
+        start_time = time.time()
+        last_text = None
+
+        while time.time() - start_time < timeout:
+            try:
+                # Получаем текущее сообщение
+                current_msg = await self.client.get_messages(self.game_bot_id, ids=message_id)
+
+                if current_msg and current_msg.text:
+                    # Если указан текст для проверки и он найден
+                    if check_text:
+                        if check_text in current_msg.text.lower():
+                            logger.info(f"[РАНЧО] Обнаружено обновление: {check_text}")
+                            return current_msg
+                    # Иначе ждем любого изменения текста
+                    elif last_text is not None and current_msg.text != last_text:
+                        logger.info("[РАНЧО] Обнаружено обновление сообщения")
+                        return current_msg
+
+                    last_text = current_msg.text
+
+            except Exception as e:
+                logger.error(f"[РАНЧО] Ошибка при проверке обновления: {e}")
+
+            await asyncio.sleep(1)
+
+        logger.warning(f"[РАНЧО] Таймаут ожидания обновления сообщения {message_id}")
+        return None
+
+    async def field_click_all_seeds(self, message: Message) -> int:
+        """Собрать все семена (нажать на все эмодзи в сетке)"""
+        success_count = 0
+
+        if not message.reply_markup:
+            logger.warning("[РАНЧО] В сообщении нет кнопок")
+            return 0
+
+        buttons = []
+        for row in message.buttons:
+            for btn in row:
+                buttons.append(btn)
+
+        logger.info(f"[РАНЧО] Всего кнопок в сетке: {len(buttons)}")
+
+        # Выводим все кнопки для отладки
+        for idx, btn in enumerate(buttons):
+            if hasattr(btn, 'text') and btn.text:
+                logger.info(f"[РАНЧО] Кнопка {idx}: '{btn.text}'")
+
+        # Ищем и нажимаем кнопки с эмодзи семян
+        for idx, btn in enumerate(buttons):
+            if hasattr(btn, 'text') and btn.text:
+                for emoji in self.seed_emojis:
+                    if emoji in btn.text:
+                        try:
+                            logger.info(f"[РАНЧО] Собираем: {btn.text} (индекс {idx})")
+                            await message.click(idx)
+                            success_count += 1
+                            await asyncio.sleep(self.field_click_delay)
+                            break
+                        except Exception as e:
+                            logger.error(f"[РАНЧО] Ошибка при сборе: {e}")
+
+        logger.info(f"[РАНЧО] Всего собрано семян: {success_count}")
+        return success_count
+
+    def field_extract_wait_time(self, text: str) -> Optional[int]:
+        """Извлечь время ожидания из текста (формат мм:сс)"""
+        # Ищем текст "через: 04:22"
+        pattern = r'через:\s*(\d+):(\d+)'
+        matches = re.findall(pattern, text)
+        if matches:
+            minutes = int(matches[0][0])
+            seconds = int(matches[0][1])
+            total_seconds = minutes * 60 + seconds + 10  # +10 сек запас
+            logger.info(f"[РАНЧО] Найдено время: {minutes}:{seconds:02d} -> ждем {total_seconds} сек")
+            return total_seconds
+
+        logger.warning("[РАНЧО] Время не найдено в тексте")
+        return None
+
+    async def field_cycle(self) -> bool:
+        """Один цикл поиска семян"""
+        logger.info("[РАНЧО] Начинаем цикл поиска семян")
+
+        # Отправляем "Ранчо" в ЛС игровому боту
+        msg = await self.field_send_message()
+        if not msg:
+            return False
+
+        # Ждем меню ранчо
+        menu_msg = None
+        for _ in range(self.field_timeout):
+            menu_msg = await self.get_message_with_buttons(after_id=msg.id, use_game_bot=True)
+            if menu_msg and "меню ранчо" in menu_msg.text.lower():
+                logger.info("[РАНЧО] Меню ранчо получено")
+                break
+            await asyncio.sleep(1)
+
+        if not menu_msg:
+            logger.warning("[РАНЧО] Меню ранчо не получено")
+            return False
+
+        # Сохраняем ID сообщения
+        message_id = menu_msg.id
+
+        # Нажимаем кнопку "Поле [поиск семян]"
+        if not await self.field_click_button(menu_msg, "поле"):
+            logger.warning("[РАНЧО] Кнопка 'Поле' не найдена")
+            return False
+
+        # Ждем обновления сообщения (появится сетка)
+        logger.info("[РАНЧО] Ожидаем появления сетки...")
+        grid_msg = await self.field_wait_for_message_update(message_id, timeout=30, check_text="жмите на семена")
+
+        if not grid_msg:
+            logger.warning("[РАНЧО] Сетка с семенами не получена")
+            return False
+
+        logger.info("[РАНЧО] Сетка с семенами получена, начинаем сбор")
+
+        # Собираем все семена
+        collected = await self.field_click_all_seeds(grid_msg)
+        logger.info(f"[РАНЧО] Собрано семян: {collected}")
+
+        # Ждем следующего обновления сообщения (результат с временем)
+        logger.info("[РАНЧО] Ожидаем результат...")
+        result_msg = await self.field_wait_for_message_update(message_id, timeout=30, check_text="собрали семена")
+
+        if result_msg:
+            # Извлекаем время до следующего похода
+            wait_time = self.field_extract_wait_time(result_msg.text)
+            if wait_time:
+                logger.info(f"[РАНЧО] Следующий поход через {wait_time} сек")
+                self.field_stats['next_time'] = time.time() + wait_time
+                await asyncio.sleep(wait_time)
+            else:
+                # Если не нашли время, ждем стандартный интервал
+                wait_time = self.field_interval
+                self.field_stats['next_time'] = time.time() + wait_time
+                logger.info(f"[РАНЧО] Время не найдено, ждем {wait_time} сек")
+                await asyncio.sleep(wait_time)
+        else:
+            # Если не получили результат, ждем стандартный интервал
+            logger.info("[РАНЧО] Результат не получен")
+            await asyncio.sleep(self.field_interval)
+
+        return True
+
+    async def field_loop(self):
+        """Бесконечный цикл поиска семян"""
+        self.field_stats['start_time'] = time.time()
+        cycle_count = 0
+
+        while self.field_running:
+            try:
+                cycle_count += 1
+                self.field_stats['cycles'] = cycle_count
+                logger.info(f"[РАНЧО] === Цикл #{cycle_count} ===")
+
+                start = time.time()
+                await self.field_cycle()
+                self.field_stats['last_duration'] = time.time() - start
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[РАНЧО] Ошибка: {e}")
+                await asyncio.sleep(60)
+
     # ==================== УПРАВЛЕНИЕ ====================
 
     def format_uptime(self, start_time):
@@ -576,12 +808,21 @@ class UniversalBot:
 
         # Работа
         if self.work_running:
-            status_lines.append(f"└─ 💼 Работа: ✅ работает")
-            status_lines.append(f"   ├─ Циклов: {self.work_stats['cycles']}")
-            status_lines.append(f"   ├─ Время работы: {self.format_uptime(self.work_stats['start_time'])}")
-            status_lines.append(f"   └─ Следующий: {self.get_next_time(self.work_stats['next_time'])}")
+            status_lines.append(f"├─ 💼 Работа: ✅ работает")
+            status_lines.append(f"│  ├─ Циклов: {self.work_stats['cycles']}")
+            status_lines.append(f"│  ├─ Время работы: {self.format_uptime(self.work_stats['start_time'])}")
+            status_lines.append(f"│  └─ Следующий: {self.get_next_time(self.work_stats['next_time'])}")
         else:
-            status_lines.append("└─ 💼 Работа: ⏹️ остановлена")
+            status_lines.append("├─ 💼 Работа: ⏹️ остановлена")
+
+        # Ранчо (поиск семян)
+        if self.field_running:
+            status_lines.append(f"└─ 🌾 Ранчо: ✅ работает")
+            status_lines.append(f"   ├─ Циклов: {self.field_stats['cycles']}")
+            status_lines.append(f"   ├─ Время работы: {self.format_uptime(self.field_stats['start_time'])}")
+            status_lines.append(f"   └─ Следующий: {self.get_next_time(self.field_stats['next_time'])}")
+        else:
+            status_lines.append("└─ 🌾 Ранчо: ⏹️ остановлено")
 
         # Общее время работы бота
         if self.bot_start_time:
@@ -649,6 +890,26 @@ class UniversalBot:
         logger.info("💼 Работа остановлена")
         return True
 
+    async def start_field(self) -> bool:
+        """Запуск поиска семян"""
+        if self.field_running:
+            return False
+        self.field_running = True
+        self.field_task = asyncio.create_task(self.field_loop())
+        logger.info("🌾 Поиск семян запущен")
+        return True
+
+    async def stop_field(self) -> bool:
+        """Остановка поиска семян"""
+        if not self.field_running:
+            return False
+        self.field_running = False
+        if self.field_task:
+            self.field_task.cancel()
+            self.field_task = None
+        logger.info("🌾 Поиск семян остановлен")
+        return True
+
     # ==================== ОБРАБОТЧИК КОМАНД ====================
 
     async def setup_handlers(self):
@@ -656,51 +917,81 @@ class UniversalBot:
 
         @self.client.on(events.NewMessage)
         async def message_handler(event):
-            # Проверяем чат
-            if event.chat_id != self.chat_id:
+            # Проверяем, что сообщение либо из группы Farm, либо из ЛС с игровым ботом
+            if event.chat_id != self.chat_id and event.chat_id != self.game_bot_id:
                 return
 
-            text = event.message.text.lower().strip() if event.message.text else ""
+            text = event.message.text if event.message.text else ""
             if not text:
                 return
 
-            logger.info(f"Получена команда: {text}")
+            text_lower = text.lower().strip()
+
+            # Список допустимых команд (только их обрабатываем)
+            valid_commands = [
+                '/shaft', 'шах',
+                '/sshaft', 'сшах',
+                '/fishing', 'рыб',
+                '/sfishing', 'срыб',
+                '/work', 'раб',
+                '/swork', 'сраб',
+                '/field', 'поле',
+                '/sfield', 'споле',
+                '/status', 'стат'
+            ]
+
+            # Если это не команда - игнорируем
+            if text_lower not in valid_commands:
+                return
+
+            logger.info(f"Получена команда: {text_lower} (чат: {event.chat_id})")
 
             # Шахта
-            if text in ['/shaft', 'шах']:
+            if text_lower in ['/shaft', 'шах']:
                 success = await self.start_shaft()
                 response = "✅ Шахта запущена!" if success else "⚠️ Шахта уже работает!"
                 await event.reply(response)
 
-            elif text in ['/sshaft', 'сшах']:
+            elif text_lower in ['/sshaft', 'сшах']:
                 success = await self.stop_shaft()
                 response = "⏹️ Шахта остановлена!" if success else "⚠️ Шахта не работает!"
                 await event.reply(response)
 
             # Рыбалка
-            elif text in ['/fishing', 'рыб']:
+            elif text_lower in ['/fishing', 'рыб']:
                 success = await self.start_fishing()
                 response = "🎣 Рыбалка запущена!" if success else "⚠️ Рыбалка уже работает!"
                 await event.reply(response)
 
-            elif text in ['/sfishing', 'срыб']:
+            elif text_lower in ['/sfishing', 'срыб']:
                 success = await self.stop_fishing()
                 response = "⏹️ Рыбалка остановлена!" if success else "⚠️ Рыбалка не работает!"
                 await event.reply(response)
 
             # Работа
-            elif text in ['/work', 'раб']:
+            elif text_lower in ['/work', 'раб']:
                 success = await self.start_work()
                 response = "💼 Работа запущена!" if success else "⚠️ Работа уже работает!"
                 await event.reply(response)
 
-            elif text in ['/swork', 'сраб']:
+            elif text_lower in ['/swork', 'сраб']:
                 success = await self.stop_work()
                 response = "⏹️ Работа остановлена!" if success else "⚠️ Работа не работает!"
                 await event.reply(response)
 
+            # Ранчо
+            elif text_lower in ['/field', 'поле']:
+                success = await self.start_field()
+                response = "🌾 Поиск семян запущен!" if success else "⚠️ Поиск семян уже работает!"
+                await event.reply(response)
+
+            elif text_lower in ['/sfield', 'споле']:
+                success = await self.stop_field()
+                response = "⏹️ Поиск семян остановлен!" if success else "⚠️ Поиск семян не работает!"
+                await event.reply(response)
+
             # Статус
-            elif text in ['/status', 'стат']:
+            elif text_lower in ['/status', 'стат']:
                 status_text = await self.get_status_text()
                 await event.reply(status_text)
 
@@ -718,13 +1009,15 @@ class UniversalBot:
             logger.info("🤖 Универсальный бот готов!")
             logger.info("")
             logger.info("Команды:")
-            logger.info("  шах /shaft    - запустить шахту")
-            logger.info("  сшах /sshaft  - остановить шахту")
-            logger.info("  рыб /fishing  - запустить рыбалку")
+            logger.info("  шах /shaft     - запустить шахту")
+            logger.info("  сшах /sshaft   - остановить шахту")
+            logger.info("  рыб /fishing   - запустить рыбалку")
             logger.info("  срыб /sfishing - остановить рыбалку")
-            logger.info("  раб /work     - запустить работу")
-            logger.info("  сраб /swork   - остановить работу")
-            logger.info("  стат /status  - показать статус")
+            logger.info("  раб /work      - запустить работу")
+            logger.info("  сраб /swork    - остановить работу")
+            logger.info("  поле /field    - запустить поиск семян")
+            logger.info("  споле /sfield  - остановить поиск семян")
+            logger.info("  стат /status   - показать статус")
             logger.info("=" * 50)
 
             await self.client.run_until_disconnected()
@@ -734,6 +1027,7 @@ class UniversalBot:
             await self.stop_shaft()
             await self.stop_fishing()
             await self.stop_work()
+            await self.stop_field()
         except Exception as e:
             logger.error(f"Критическая ошибка: {e}", exc_info=True)
         finally:
