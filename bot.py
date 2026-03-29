@@ -1,27 +1,22 @@
 #!/usr/bin/env python3
 """
-Универсальный Telegram юзербот
-Управление: шахта, рыбалка, работа, ранчо (поиск семян)
-Команды:
-  шах /shaft     - запустить шахту
-  сшах /sshaft   - остановить шахту
-  рыб /fishing   - запустить рыбалку
-  срыб /sfishing - остановить рыбалку
-  раб /work      - запустить работу
-  сраб /swork    - остановить работу
-  поле /field    - запустить поиск семян
-  споле /sfield  - остановить поиск семян
-  стат /status   - показать статус
+=============================================================================
+🤖 УНИВЕРСАЛЬНЫЙ TELEGRAM БОТ — ОДИН ФАЙЛ
+=============================================================================
+Модули: Шахта | Рыбалка | Работа | Поле | Грядки | Гонки
+Все функции в одном файле для простоты запуска
+=============================================================================
 """
 
 import asyncio
 import logging
 import sys
 import time
-import random
-import re
 import os
-from typing import Optional, Tuple
+import re
+import random
+import unicodedata
+from typing import Optional, List, Tuple, Dict
 
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
@@ -29,25 +24,952 @@ from telethon.tl.types import Message
 
 import config
 
-# Создаем папку для сессии если её нет
+# =============================================================================
+# 📁 НАСТРОЙКИ
+# =============================================================================
 SESSION_DIR = 'sessions'
 if not os.path.exists(SESSION_DIR):
     os.makedirs(SESSION_DIR)
 
-# Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 
-class UniversalBot:
-    """Универсальный бот для шахты, рыбалки, работы и ранчо"""
+# =============================================================================
+# 🔧 ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# =============================================================================
 
+def normalize_text(text: str) -> str:
+    """Нормализовать текст: убрать невидимые символы"""
+    if not text:
+        return ""
+    text = re.sub(r'[\u200b\u200c\u200d\u200e\u200f\ufeff]', '', text)
+    text = unicodedata.normalize('NFKC', text)
+    return text.strip()
+
+
+async def click_safe(client, message: Message, index: int, delay: float = None) -> bool:
+    """Безопасный клик с обработкой FloodWait"""
+    if delay is None:
+        delay = config.CLICK_DELAY
+    try:
+        if not message or not message.reply_markup:
+            return False
+        await message.click(index)
+        await asyncio.sleep(delay)
+        return True
+    except FloodWaitError as e:
+        logger.warning(f"⏳ FloodWait: {e.seconds} сек")
+        await asyncio.sleep(e.seconds + 1)
+        return False
+    except Exception as e:
+        logger.error(f"❌ Ошибка клика: {e}")
+        return False
+
+
+async def wait_for_message(client, chat_id: int, my_id: int, after_id: int = 0,
+                           timeout: int = None, check_text: str = None,
+                           has_buttons: bool = False) -> Optional[Message]:
+    """Ожидать сообщение с условиями"""
+    if timeout is None:
+        timeout = config.MESSAGE_TIMEOUT
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            async for msg in client.iter_messages(chat_id, limit=10):
+                if msg.id <= after_id:
+                    continue
+                if msg.sender_id == my_id:
+                    continue
+                if has_buttons and not msg.reply_markup:
+                    continue
+                if check_text and msg.text and check_text.lower() not in msg.text.lower():
+                    continue
+                return msg
+        except Exception as e:
+            logger.error(f"Ошибка поиска: {e}")
+        await asyncio.sleep(0.8)
+    return None
+
+
+async def handle_ok_alert(client, chat_id: int, my_id: int, timeout: int = 8) -> bool:
+    """Найти и нажать ОК"""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            async for msg in client.iter_messages(chat_id, limit=5):
+                if msg.sender_id == my_id:
+                    continue
+                if msg.text and msg.reply_markup:
+                    for row in msg.buttons:
+                        for btn in row:
+                            if hasattr(btn, 'text') and btn.text:
+                                if btn.text.lower() in config.BUTTONS['ok']:
+                                    await msg.click(btn)
+                                    await asyncio.sleep(0.8)
+                                    return True
+        except:
+            pass
+        await asyncio.sleep(0.7)
+    return False
+
+
+# =============================================================================
+# ⛏️  МОДУЛЬ: ШАХТА
+# =============================================================================
+
+class ShaftModule:
+    def __init__(self, client, my_id):
+        self.name = "⛏️ ШАХТА"
+        self.chat_id = config.GROUP_CHAT_ID
+        self.client = client
+        self.my_id = my_id
+        self.running = False
+        self.task = None
+        self.stats = {'cycles': 0, 'start_time': None, 'success': 0, 'fail': 0}
+        logger.info(f"[{self.name}] Инициализирован")
+
+    async def cycle(self) -> bool:
+        logger.info(f"[{self.name}] Начинаем цикл")
+
+        msg = await self.client.send_message(self.chat_id, "Шахта")
+        await asyncio.sleep(1)
+
+        menu_msg = await wait_for_message(self.client, self.chat_id, self.my_id,
+                                          after_id=msg.id, has_buttons=True,
+                                          timeout=config.SHAFT_TIMEOUT)
+        if not menu_msg:
+            return False
+
+        # Найти и нажать "Спуститься"
+        buttons = []
+        for row in menu_msg.buttons:
+            for btn in row:
+                buttons.append(btn)
+        for idx, btn in enumerate(buttons):
+            if hasattr(btn, 'text') and btn.text and "спуст" in btn.text.lower():
+                await click_safe(self.client, menu_msg, idx, delay=2)
+                break
+
+        # Ждём ресурсы
+        resources_msg = await wait_for_message(self.client, self.chat_id, self.my_id,
+                                               after_id=menu_msg.id, has_buttons=True,
+                                               timeout=config.SHAFT_TIMEOUT)
+        if not resources_msg:
+            return False
+
+        # Собираем 💎 → 🪨
+        collected = await self._collect(resources_msg)
+        logger.info(f"[{self.name}] Собрано: {collected}")
+        return collected > 0
+
+    async def _collect(self, message: Message) -> int:
+        count = 0
+        if not message.reply_markup:
+            return 0
+
+        for _ in range(10):  # Алмазы
+            found = False
+            buttons = [btn for row in message.buttons for btn in row]
+            for idx, btn in enumerate(buttons):
+                if hasattr(btn, 'text') and btn.text and config.SHAFT_EMOJIS['diamond'] in btn.text:
+                    if await click_safe(self.client, message, idx, delay=2):
+                        count += 1
+                        found = True
+                        try:
+                            message = await self.client.get_messages(self.chat_id, ids=message.id)
+                        except:
+                            pass
+                        break
+            if not found:
+                break
+
+        for _ in range(10):  # Камни
+            found = False
+            buttons = [btn for row in message.buttons for btn in row]
+            for idx, btn in enumerate(buttons):
+                if hasattr(btn, 'text') and btn.text and config.SHAFT_EMOJIS['stone'] in btn.text:
+                    if await click_safe(self.client, message, idx, delay=2):
+                        count += 1
+                        found = True
+                        try:
+                            message = await self.client.get_messages(self.chat_id, ids=message.id)
+                        except:
+                            pass
+                        break
+            if not found:
+                break
+        return count
+
+    async def loop(self):
+        self.stats['start_time'] = time.time()
+        logger.info(f"[{self.name}] 🚀 Запущен")
+        while self.running:
+            try:
+                self.stats['cycles'] += 1
+                logger.info(f"[{self.name}] 📊 Цикл #{self.stats['cycles']}")
+                start = time.time()
+                ok = await self.cycle()
+                if ok:
+                    self.stats['success'] += 1
+                else:
+                    self.stats['fail'] += 1
+                logger.info(f"[{self.name}] ⏱️ {int(time.time() - start)}сек")
+                await asyncio.sleep(config.SHAFT_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.name}] ❌ {e}")
+                await asyncio.sleep(60)
+
+    async def start(self):
+        if self.running:
+            return False
+        self.running = True
+        self.task = asyncio.create_task(self.loop())
+        return True
+
+    async def stop(self):
+        if not self.running:
+            return False
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except:
+                pass
+        return True
+
+    def get_status(self) -> dict:
+        uptime = "0м"
+        if self.stats['start_time']:
+            m = int((time.time() - self.stats['start_time']) / 60)
+            uptime = f"{m}мин"
+        return {'name': self.name, 'running': self.running, 'cycles': self.stats['cycles'],
+                'uptime': uptime, 'success': self.stats['success'], 'fail': self.stats['fail']}
+
+
+# =============================================================================
+# 🎣  МОДУЛЬ: РЫБАЛКА
+# =============================================================================
+
+class FishingModule:
+    def __init__(self, client, my_id):
+        self.name = "🎣 РЫБАЛКА"
+        self.chat_id = config.GROUP_CHAT_ID
+        self.client = client
+        self.my_id = my_id
+        self.running = False
+        self.task = None
+        self.stats = {'cycles': 0, 'start_time': None, 'success': 0, 'fail': 0}
+        logger.info(f"[{self.name}] Инициализирован")
+
+    async def cycle(self) -> bool:
+        logger.info(f"[{self.name}] Начинаем цикл")
+
+        msg = await self.client.send_message(self.chat_id, "Рыбалка")
+        await asyncio.sleep(1.5)
+
+        menu_msg = await wait_for_message(self.client, self.chat_id, self.my_id,
+                                          after_id=msg.id, has_buttons=True,
+                                          timeout=config.FISHING_TIMEOUT)
+        if not menu_msg:
+            return False
+
+        # Нажать "Рыбачить"
+        buttons = [btn for row in menu_msg.buttons for btn in row]
+        for idx, btn in enumerate(buttons):
+            if hasattr(btn, 'text') and btn.text and 'рыбачить' in btn.text.lower():
+                await click_safe(self.client, menu_msg, idx, delay=2)
+                break
+
+        # Ждём сетку
+        grid_id = None
+        start = time.time()
+        while time.time() - start < config.FISHING_TIMEOUT:
+            async for m in self.client.iter_messages(self.chat_id, limit=10):
+                if m.id <= menu_msg.id or m.sender_id == self.my_id:
+                    continue
+                if m.text and 'закинули удочку' in m.text.lower():
+                    grid_id = m.id
+                    break
+            if grid_id:
+                break
+            await asyncio.sleep(0.5)
+
+        if not grid_id:
+            return False
+
+        return await self._wait_and_hook(grid_id)
+
+    async def _wait_and_hook(self, grid_id: int, max_wait: int = 30) -> bool:
+        start = time.time()
+        while time.time() - start < max_wait:
+            try:
+                msg = await self.client.get_messages(self.chat_id, ids=grid_id)
+                if not msg or not msg.reply_markup:
+                    await asyncio.sleep(0.3)
+                    continue
+
+                buttons = [(btn.text, btn) for row in msg.buttons for btn in row if hasattr(btn, 'text')]
+
+                for idx, (txt, btn) in enumerate(buttons):
+                    if txt:
+                        for emoji in config.FISHING_EMOJIS:
+                            if emoji in txt:
+                                delay = random.uniform(config.FISHING_DELAY_MIN, config.FISHING_DELAY_MAX)
+                                logger.info(f"[{self.name}] 🐟 Поклевка! ({emoji}) Задержка {delay:.1f}с")
+                                await asyncio.sleep(delay)
+
+                                for attempt in range(3):
+                                    try:
+                                        fresh = await self.client.get_messages(self.chat_id, ids=grid_id)
+                                        await fresh.click(idx)
+                                        await asyncio.sleep(1.5)
+                                        check = await self.client.get_messages(self.chat_id, ids=grid_id)
+                                        if check.text and ('поймали' in check.text.lower() or not check.reply_markup):
+                                            return True
+                                        await asyncio.sleep(1)
+                                    except:
+                                        await asyncio.sleep(0.5)
+                                return False
+            except Exception as e:
+                logger.error(f"[{self.name}] Ошибка: {e}")
+            await asyncio.sleep(0.4)
+        return False
+
+    async def loop(self):
+        self.stats['start_time'] = time.time()
+        logger.info(f"[{self.name}] 🚀 Запущен")
+        while self.running:
+            try:
+                self.stats['cycles'] += 1
+                logger.info(f"[{self.name}] 📊 Цикл #{self.stats['cycles']}")
+                start = time.time()
+                ok = await self.cycle()
+                if ok:
+                    self.stats['success'] += 1
+                else:
+                    self.stats['fail'] += 1
+                logger.info(f"[{self.name}] ⏱️ {int(time.time() - start)}сек")
+                interval = random.uniform(config.FISHING_INTERVAL_MIN, config.FISHING_INTERVAL_MAX)
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.name}] ❌ {e}")
+                await asyncio.sleep(60)
+
+    async def start(self):
+        if self.running:
+            return False
+        self.running = True
+        self.task = asyncio.create_task(self.loop())
+        return True
+
+    async def stop(self):
+        if not self.running:
+            return False
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except:
+                pass
+        return True
+
+    def get_status(self) -> dict:
+        uptime = "0м"
+        if self.stats['start_time']:
+            m = int((time.time() - self.stats['start_time']) / 60)
+            uptime = f"{m}мин"
+        return {'name': self.name, 'running': self.running, 'cycles': self.stats['cycles'],
+                'uptime': uptime, 'success': self.stats['success'], 'fail': self.stats['fail']}
+
+
+# =============================================================================
+# 💼  МОДУЛЬ: РАБОТА
+# =============================================================================
+
+class WorkModule:
+    def __init__(self, client, my_id):
+        self.name = "💼 РАБОТА"
+        self.chat_id = config.GROUP_CHAT_ID
+        self.client = client
+        self.my_id = my_id
+        self.running = False
+        self.task = None
+        self.stats = {'cycles': 0, 'start_time': None, 'success': 0, 'fail': 0}
+        logger.info(f"[{self.name}] Инициализирован")
+
+    def _extract_emoji(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        pattern = r'«\s*([^\s»]+)\s*»'
+        matches = re.findall(pattern, text)
+        return matches[0].strip() if matches else None
+
+    def _is_completed(self, text: str) -> bool:
+        if not text:
+            return False
+        return any(k in text.lower() for k in config.WORK_KEYWORDS['completed'])
+
+    async def cycle(self) -> bool:
+        logger.info(f"[{self.name}] Начинаем цикл")
+
+        msg = await self.client.send_message(self.chat_id, "Работать")
+        await asyncio.sleep(1.5)
+
+        current = await wait_for_message(self.client, self.chat_id, self.my_id,
+                                         after_id=msg.id, has_buttons=True,
+                                         timeout=config.WORK_TIMEOUT)
+        if not current or not current.text:
+            return False
+
+        for _ in range(30):
+            if self._is_completed(current.text):
+                logger.info(f"[{self.name}] ✅ Смена завершена!")
+                return True
+
+            emoji = self._extract_emoji(current.text)
+            if not emoji:
+                await asyncio.sleep(2)
+                try:
+                    current = await self.client.get_messages(self.chat_id, ids=current.id)
+                except:
+                    break
+                continue
+
+            # Найти и нажать кнопку с эмодзи
+            buttons = [btn for row in current.buttons for btn in row]
+            clicked = False
+            for idx, btn in enumerate(buttons):
+                if hasattr(btn, 'text') and btn.text and emoji in btn.text:
+                    await click_safe(self.client, current, idx, delay=config.WORK_CLICK_DELAY)
+                    clicked = True
+                    break
+
+            if clicked:
+                await asyncio.sleep(2.5)
+                try:
+                    current = await self.client.get_messages(self.chat_id, ids=current.id)
+                except:
+                    break
+            else:
+                await asyncio.sleep(2)
+                try:
+                    current = await self.client.get_messages(self.chat_id, ids=current.id)
+                except:
+                    break
+        return True
+
+    async def loop(self):
+        self.stats['start_time'] = time.time()
+        logger.info(f"[{self.name}] 🚀 Запущен")
+        while self.running:
+            try:
+                self.stats['cycles'] += 1
+                logger.info(f"[{self.name}] 📊 Цикл #{self.stats['cycles']}")
+                start = time.time()
+                ok = await self.cycle()
+                if ok:
+                    self.stats['success'] += 1
+                else:
+                    self.stats['fail'] += 1
+                logger.info(f"[{self.name}] ⏱️ {int(time.time() - start)}сек")
+                await asyncio.sleep(config.WORK_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.name}] ❌ {e}")
+                await asyncio.sleep(60)
+
+    async def start(self):
+        if self.running:
+            return False
+        self.running = True
+        self.task = asyncio.create_task(self.loop())
+        return True
+
+    async def stop(self):
+        if not self.running:
+            return False
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except:
+                pass
+        return True
+
+    def get_status(self) -> dict:
+        uptime = "0м"
+        if self.stats['start_time']:
+            m = int((time.time() - self.stats['start_time']) / 60)
+            uptime = f"{m}мин"
+        return {'name': self.name, 'running': self.running, 'cycles': self.stats['cycles'],
+                'uptime': uptime, 'success': self.stats['success'], 'fail': self.stats['fail']}
+
+
+# =============================================================================
+# 🌾  МОДУЛЬ: ПОЛЕ (ПОИСК СЕМЯН)
+# =============================================================================
+
+class FieldModule:
+    def __init__(self, client, my_id):
+        self.name = "🌾 ПОЛЕ"
+        self.chat_id = config.PRIVATE_CHAT_ID
+        self.client = client
+        self.my_id = my_id
+        self.running = False
+        self.task = None
+        self.stats = {'cycles': 0, 'start_time': None, 'success': 0, 'fail': 0}
+        logger.info(f"[{self.name}] Инициализирован")
+
+    async def cycle(self) -> bool:
+        logger.info(f"[{self.name}] Начинаем цикл")
+
+        msg = await self.client.send_message(self.chat_id, "Ранчо")
+        await asyncio.sleep(1)
+
+        menu = await wait_for_message(self.client, self.chat_id, self.my_id,
+                                      after_id=msg.id, check_text="меню ранчо",
+                                      has_buttons=True, timeout=config.FIELD_TIMEOUT)
+        if not menu:
+            return False
+
+        msg_id = menu.id
+
+        # Нажать "Поле"
+        buttons = [btn for row in menu.buttons for btn in row]
+        clicked = False
+        for idx, btn in enumerate(buttons):
+            if hasattr(btn, 'text') and btn.text:
+                if any(k in btn.text.lower() for k in ['поле', 'поиск семян']):
+                    await click_safe(self.client, menu, idx, delay=2)
+                    clicked = True
+                    break
+        if not clicked:
+            return False
+
+        # Ждём сетку
+        grid = None
+        start = time.time()
+        while time.time() - start < config.FIELD_TIMEOUT:
+            try:
+                m = await self.client.get_messages(self.chat_id, ids=msg_id)
+                if m and m.text and "жмите на семена" in m.text.lower():
+                    grid = m
+                    break
+            except:
+                pass
+            await asyncio.sleep(1)
+
+        if not grid:
+            return False
+
+        # Собираем семена
+        collected = 0
+        buttons = [btn for row in grid.buttons for btn in row]
+        for idx, btn in enumerate(buttons):
+            if hasattr(btn, 'text') and btn.text:
+                for emoji in config.SEED_EMOJIS:
+                    if emoji in btn.text:
+                        if await click_safe(self.client, grid, idx, delay=config.FIELD_CLICK_DELAY):
+                            collected += 1
+                        break
+
+        logger.info(f"[{self.name}] 🌱 Собрано: {collected}")
+
+        # Ждём результат с временем
+        wait_time = None
+        start = time.time()
+        while time.time() - start < config.FIELD_TIMEOUT:
+            try:
+                m = await self.client.get_messages(self.chat_id, ids=msg_id)
+                if m and m.text and "собрали семена" in m.text.lower():
+                    pattern = r'через:\s*(\d+):(\d+)'
+                    matches = re.findall(pattern, m.text)
+                    if matches:
+                        wait_time = int(matches[0][0]) * 60 + int(matches[0][1]) + 10
+                    break
+            except:
+                pass
+            await asyncio.sleep(1)
+
+        if wait_time:
+            logger.info(f"[{self.name}] ⏱️ Ждём {wait_time} сек")
+            await asyncio.sleep(wait_time)
+        else:
+            await asyncio.sleep(config.FIELD_INTERVAL)
+
+        return True
+
+    async def loop(self):
+        self.stats['start_time'] = time.time()
+        logger.info(f"[{self.name}] 🚀 Запущен")
+        while self.running:
+            try:
+                self.stats['cycles'] += 1
+                logger.info(f"[{self.name}] 📊 Цикл #{self.stats['cycles']}")
+                start = time.time()
+                ok = await self.cycle()
+                if ok:
+                    self.stats['success'] += 1
+                else:
+                    self.stats['fail'] += 1
+                logger.info(f"[{self.name}] ⏱️ {int(time.time() - start)}сек")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.name}] ❌ {e}")
+                await asyncio.sleep(60)
+
+    async def start(self):
+        if self.running:
+            return False
+        self.running = True
+        self.task = asyncio.create_task(self.loop())
+        return True
+
+    async def stop(self):
+        if not self.running:
+            return False
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except:
+                pass
+        return True
+
+    def get_status(self) -> dict:
+        uptime = "0м"
+        if self.stats['start_time']:
+            m = int((time.time() - self.stats['start_time']) / 60)
+            uptime = f"{m}мин"
+        return {'name': self.name, 'running': self.running, 'cycles': self.stats['cycles'],
+                'uptime': uptime, 'success': self.stats['success'], 'fail': self.stats['fail']}
+
+
+# =============================================================================
+# 🌱  МОДУЛЬ: ГРЯДКИ
+# =============================================================================
+
+class GardenModule:
+    def __init__(self, client, my_id):
+        self.name = "🌱 ГРЯДКИ"
+        self.chat_id = config.PRIVATE_CHAT_ID
+        self.client = client
+        self.my_id = my_id
+        self.running = False
+        self.task = None
+        self.stats = {'cycles': 0, 'start_time': None, 'success': 0, 'fail': 0}
+        self.garden_msg: Optional[Message] = None
+        self.ranch_id: Optional[int] = None
+        logger.info(f"[{self.name}] Инициализирован")
+
+    def _get_bed_action(self, text: str) -> str:
+        if not text:
+            return 'skip'
+        if text.strip() == '' or text == '⠀' or text in config.BED_STATES['empty']:
+            return 'plant'
+        for s in config.BED_STATES['ready']:
+            if s in text:
+                return 'harvest'
+        for s in config.BED_STATES['water']:
+            if s in text:
+                return 'water'
+        return 'skip'
+
+    def _verify(self, old: str, new: str, action: str) -> bool:
+        if action == 'plant':
+            if (old.strip() == '' or old == '⠀') and (new.strip() != '' and new != '⠀'):
+                return True
+            return any(e in new for e in config.PLANT_EMOJIS)
+        elif action == 'water':
+            return '💧' in old and '💧' not in new
+        elif action == 'harvest':
+            return '🌾' in old and '🌾' not in new
+        return False
+
+    async def _navigate(self) -> bool:
+        msg = await self.client.send_message(self.chat_id, "Ранчо")
+        await asyncio.sleep(1)
+
+        async for menu in self.client.iter_messages(self.chat_id, limit=10):
+            if menu.sender_id == self.my_id:
+                continue
+            if menu.reply_markup and 'Грядки' in str(menu.reply_markup):
+                self.ranch_id = menu.id
+                buttons = [btn for row in menu.buttons for btn in row]
+                for idx, btn in enumerate(buttons):
+                    if hasattr(btn, 'text') and 'Грядки' in btn.text:
+                        await click_safe(self.client, menu, idx, delay=2)
+                        break
+                await asyncio.sleep(1.5)
+
+                async for gm in self.client.iter_messages(self.chat_id, limit=10):
+                    if gm.sender_id == self.my_id:
+                        continue
+                    if gm.text and 'грядк' in gm.text.lower():
+                        self.garden_msg = gm
+                        return True
+                break
+        return False
+
+    async def _refresh(self):
+        await asyncio.sleep(1)
+        if not self.ranch_id:
+            return
+        async for m in self.client.iter_messages(self.chat_id, limit=10):
+            if m.sender_id == self.my_id:
+                continue
+            if (m.id == self.ranch_id or m.id > self.ranch_id) and m.text and 'грядк' in m.text.lower():
+                self.garden_msg = m
+                return
+
+    def _get_beds(self) -> List[str]:
+        if not self.garden_msg or not self.garden_msg.reply_markup:
+            return []
+        beds = []
+        for row in self.garden_msg.buttons:
+            for btn in row:
+                if hasattr(btn, 'text'):
+                    beds.append(btn.text)
+        return beds[:16]
+
+    async def _process(self, idx: int, action: str) -> bool:
+        beds = self._get_beds()
+        if idx >= len(beds):
+            return False
+        old = beds[idx]
+
+        await click_safe(self.client, self.garden_msg, idx, delay=config.CLICK_DELAY)
+        await handle_ok_alert(self.client, self.chat_id, self.my_id)
+
+        await self._refresh()
+        new_beds = self._get_beds()
+        if idx < len(new_beds):
+            new = new_beds[idx]
+            if self._verify(old, new, action):
+                logger.info(f"[{self.name}] ✅ #{idx}: '{old}' → '{new}'")
+                return True
+        return False
+
+    async def cycle(self) -> bool:
+        logger.info(f"[{self.name}] Начинаем цикл")
+
+        if not await self._navigate():
+            return False
+
+        beds = self._get_beds()
+        if len(beds) < 16:
+            return False
+
+        stats = {'p': 0, 'w': 0, 'h': 0}
+
+        for i in range(16):
+            for attempt in range(3):
+                beds = self._get_beds()
+                if i >= len(beds):
+                    break
+                action = self._get_bed_action(beds[i])
+                if action == 'skip':
+                    break
+                ok = await self._process(i, action)
+                if ok:
+                    if action == 'plant':
+                        stats['p'] += 1
+                    elif action == 'water':
+                        stats['w'] += 1
+                    elif action == 'harvest':
+                        stats['h'] += 1
+                    await self._refresh()
+                    continue
+                break
+            await asyncio.sleep(0.5)
+
+        logger.info(f"[{self.name}] ✅ 🌱{stats['p']} 💧{stats['w']} 🌾{stats['h']}")
+        return True
+
+    async def loop(self):
+        self.stats['start_time'] = time.time()
+        logger.info(f"[{self.name}] 🚀 Запущен")
+        while self.running:
+            try:
+                self.stats['cycles'] += 1
+                logger.info(f"[{self.name}] 📊 Цикл #{self.stats['cycles']}")
+                start = time.time()
+                ok = await self.cycle()
+                if ok:
+                    self.stats['success'] += 1
+                else:
+                    self.stats['fail'] += 1
+                logger.info(f"[{self.name}] ⏱️ {int(time.time() - start)}сек")
+                await asyncio.sleep(config.GARDEN_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.name}] ❌ {e}")
+                await asyncio.sleep(60)
+
+    async def start(self):
+        if self.running:
+            return False
+        self.running = True
+        self.task = asyncio.create_task(self.loop())
+        return True
+
+    async def stop(self):
+        if not self.running:
+            return False
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except:
+                pass
+        return True
+
+    def get_status(self) -> dict:
+        uptime = "0м"
+        if self.stats['start_time']:
+            m = int((time.time() - self.stats['start_time']) / 60)
+            uptime = f"{m}мин"
+        return {'name': self.name, 'running': self.running, 'cycles': self.stats['cycles'],
+                'uptime': uptime, 'success': self.stats['success'], 'fail': self.stats['fail']}
+
+
+# =============================================================================
+# 🏁  МОДУЛЬ: ГОНКИ
+# =============================================================================
+
+class RaceModule:
+    def __init__(self, client, my_id):
+        self.name = "🏁 ГОНКИ"
+        self.chat_id = config.GROUP_CHAT_ID
+        self.client = client
+        self.my_id = my_id
+        self.running = False
+        self.task = None
+        self.stats = {'cycles': 0, 'start_time': None, 'success': 0, 'fail': 0}
+        logger.info(f"[{self.name}] Инициализирован")
+
+    def _get_target(self, text: str) -> Optional[str]:
+        if not text:
+            return None
+        t = normalize_text(text).lower()
+        if 'красн' in t:
+            return config.RACE_BUTTONS['red']
+        elif 'жёлт' in t or 'желт' in t:
+            return config.RACE_BUTTONS['yellow']
+        elif 'зелён' in t or 'зелен' in t:
+            return config.RACE_BUTTONS['green']
+        return None
+
+    async def cycle(self) -> bool:
+        logger.info(f"[{self.name}] Начинаем гонку")
+
+        msg = await self.client.send_message(self.chat_id, "Гонка")
+        await asyncio.sleep(1)
+
+        btn_msg = await wait_for_message(self.client, self.chat_id, self.my_id,
+                                         after_id=msg.id, has_buttons=True,
+                                         timeout=config.RACE_TIMEOUT)
+        if not btn_msg:
+            return False
+
+        target = self._get_target(btn_msg.text)
+        if not target:
+            logger.warning(f"[{self.name}] Не определён цвет")
+            return False
+
+        # Нажать кнопку с эмодзи
+        buttons = [btn for row in btn_msg.buttons for btn in row]
+        for idx, btn in enumerate(buttons):
+            if hasattr(btn, 'text') and btn.text and target in btn.text:
+                await click_safe(self.client, btn_msg, idx, delay=1)
+                break
+
+        # Ждём финиш
+        start = time.time()
+        while time.time() - start < 60:
+            async for m in self.client.iter_messages(self.chat_id, limit=20):
+                if m.id <= btn_msg.id or m.sender_id == self.my_id:
+                    continue
+                if m.text:
+                    ct = normalize_text(m.text).lower()
+                    if any(p in ct for p in config.RACE_FINISH_PHRASES):
+                        logger.info(f"[{self.name}] 🏁 Финиш!")
+                        return True
+            await asyncio.sleep(1)
+        return True
+
+    async def loop(self):
+        self.stats['start_time'] = time.time()
+        logger.info(f"[{self.name}] 🚀 Запущен")
+        while self.running:
+            try:
+                self.stats['cycles'] += 1
+                logger.info(f"[{self.name}] 📊 Цикл #{self.stats['cycles']}")
+                start = time.time()
+                ok = await self.cycle()
+                if ok:
+                    self.stats['success'] += 1
+                else:
+                    self.stats['fail'] += 1
+                logger.info(f"[{self.name}] ⏱️ {int(time.time() - start)}сек")
+                await asyncio.sleep(config.RACE_INTERVAL)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"[{self.name}] ❌ {e}")
+                await asyncio.sleep(60)
+
+    async def start(self):
+        if self.running:
+            return False
+        self.running = True
+        self.task = asyncio.create_task(self.loop())
+        return True
+
+    async def stop(self):
+        if not self.running:
+            return False
+        self.running = False
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except:
+                pass
+        return True
+
+    def get_status(self) -> dict:
+        uptime = "0м"
+        if self.stats['start_time']:
+            m = int((time.time() - self.stats['start_time']) / 60)
+            uptime = f"{m}мин"
+        return {'name': self.name, 'running': self.running, 'cycles': self.stats['cycles'],
+                'uptime': uptime, 'success': self.stats['success'], 'fail': self.stats['fail']}
+
+
+# =============================================================================
+# 🤖 ГЛАВНЫЙ КЛАСС БОТА
+# =============================================================================
+
+class UniversalBot:
     def __init__(self):
-        # Создаем клиент с единой сессией
         self.client = TelegramClient(
             f'{SESSION_DIR}/universal_bot',
             config.API_ID,
@@ -55,995 +977,178 @@ class UniversalBot:
             device_model="Python Universal Bot",
             system_version="3.0"
         )
-
-        # Состояния активностей
-        self.shaft_running = False
-        self.fishing_running = False
-        self.work_running = False
-        self.field_running = False
-
-        # Задачи активностей
-        self.shaft_task: Optional[asyncio.Task] = None
-        self.fishing_task: Optional[asyncio.Task] = None
-        self.work_task: Optional[asyncio.Task] = None
-        self.field_task: Optional[asyncio.Task] = None
-
-        # Статистика
-        self.bot_start_time = None
-        self.shaft_stats = {'cycles': 0, 'start_time': None, 'next_time': None, 'last_duration': 0}
-        self.fishing_stats = {'cycles': 0, 'start_time': None, 'next_time': None, 'last_duration': 0}
-        self.work_stats = {'cycles': 0, 'start_time': None, 'next_time': None, 'last_duration': 0}
-        self.field_stats = {'cycles': 0, 'start_time': None, 'next_time': None, 'last_duration': 0}
-
-        # Общие настройки
-        self.chat_id = int(config.CHAT_ID) if str(config.CHAT_ID).lstrip('-').isdigit() else config.CHAT_ID
-        self.game_bot_id = config.GAME_BOT_ID  # ID игрового бота для ранчо
-
-        # Настройки шахты
-        self.shaft_interval = config.SHAFT_INTERVAL
-        self.shaft_timeout = config.SHAFT_TIMEOUT
-        self.diamond_emoji = "💎"
-        self.stone_emoji = "🪨"
-
-        # Настройки рыбалки
-        self.fishing_interval_min = config.FISHING_INTERVAL_MIN
-        self.fishing_interval_max = config.FISHING_INTERVAL_MAX
-        self.fishing_timeout = config.FISHING_TIMEOUT
-        self.fishing_delay_min = config.FISHING_DELAY_MIN
-        self.fishing_delay_max = config.FISHING_DELAY_MAX
-        self.fishing_emojis = [
-            '🐟', '🐠', '🐡', '🦈', '🐋', '🐳', '🐬', '🐙', '🦑', '🐚',
-            '🦀', '🦞', '🦐', '🐉', '🐲', '🌊', '💧', '💦', '🎣', '🪸'
-        ]
-
-        # Настройки работы
-        self.work_interval = config.WORK_INTERVAL
-        self.work_timeout = config.WORK_TIMEOUT
-        self.work_click_delay = config.WORK_CLICK_DELAY
-
-        # Настройки ранчо (поиск семян)
-        self.field_interval = config.FIELD_INTERVAL
-        self.field_timeout = config.FIELD_TIMEOUT
-        self.field_click_delay = config.FIELD_CLICK_DELAY
-        # Эмодзи для семян (овощи, фрукты, ягоды)
-        self.seed_emojis = [
-            '🧅', '🍅', '🥬', '🥕', '🌽', '🥒', '🍆', '🫑', '🥔', '🍠',
-            '🍓', '🫐', '🍇', '🍉', '🍊', '🍋', '🍎', '🍐', '🍑', '🍒',
-            '🥝', '🥥', '🌶️', '🧄', '🫒', '🥦', '🌻', '🌾', '🍄', '🌿'
-        ]
-
-        logger.info("Универсальный бот инициализирован")
-
-    # ==================== ОБЩИЕ МЕТОДЫ ====================
+        self.my_id = None
+        self.start_time = None
+        self.modules: Dict[str, object] = {}
+        logger.info("🤖 Универсальный бот инициализирован")
 
     async def start_client(self):
-        """Запуск клиента и авторизация"""
-        try:
-            await self.client.start(phone=config.PHONE_NUMBER)
-            logger.info("Клиент успешно запущен и авторизован")
-
-            me = await self.client.get_me()
-            logger.info(f"Авторизован как: {me.first_name} (@{me.username}, ID: {me.id})")
-
-            chat_entity = await self.client.get_entity(self.chat_id)
-            chat_info = getattr(chat_entity, 'title', str(chat_entity.id))
-            logger.info(f"Чат найден: {chat_info}")
-
-        except FloodWaitError as e:
-            logger.error(f"Ошибка FloodWait: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Ошибка запуска клиента: {e}")
-            raise
-
-    async def get_message_with_buttons(self, after_id: int = 0, exclude_self: bool = True,
-                                       use_game_bot: bool = False) -> Optional[Message]:
-        """Получить сообщение с кнопками"""
-        try:
-            me = await self.client.get_me() if exclude_self else None
-            chat_id = self.game_bot_id if use_game_bot else self.chat_id
-
-            async for message in self.client.iter_messages(chat_id, limit=10):
-                if message.id <= after_id:
-                    continue
-                if exclude_self and message.sender_id == me.id:
-                    continue
-                if message.reply_markup:
-                    return message
-        except Exception as e:
-            logger.error(f"Ошибка получения сообщения: {e}")
-        return None
-
-    # ==================== МЕТОДЫ ШАХТЫ ====================
-
-    async def shaft_send_message(self) -> Optional[Message]:
-        """Отправка сообщения 'Шахта'"""
-        try:
-            message = await self.client.send_message(self.chat_id, "Шахта")
-            logger.info("[ШАХТА] Сообщение отправлено")
-            return message
-        except Exception as e:
-            logger.error(f"[ШАХТА] Ошибка: {e}")
-            return None
-
-    async def shaft_find_descent_button(self, message: Message) -> bool:
-        """Найти и нажать кнопку 'Спуститься'"""
-        try:
-            if not message or not message.reply_markup:
-                return False
-
-            flat_buttons = []
-            for row in message.buttons:
-                for btn in row:
-                    flat_buttons.append(btn)
-
-            button_index = None
-            for idx, btn in enumerate(flat_buttons):
-                if hasattr(btn, 'text') and btn.text and "спуст" in btn.text.lower():
-                    button_index = idx
-                    break
-
-            if button_index is None:
-                return False
-
-            await message.click(button_index)
-            await asyncio.sleep(10)
-            return True
-
-        except Exception as e:
-            logger.error(f"[ШАХТА] Ошибка нажатия кнопки: {e}")
-            return False
-
-    async def shaft_click_resources(self, message: Message) -> int:
-        """Сбор ресурсов (сначала 💎, потом 🪨)"""
-        success_count = 0
-        click_delay = 3
-
-        while True:
-            try:
-                current_msg = await self.client.get_messages(self.chat_id, ids=message.id)
-                if not current_msg or not current_msg.reply_markup:
-                    break
-            except Exception:
-                break
-
-            found = False
-            flat_buttons = []
-            for row in current_msg.buttons:
-                for btn in row:
-                    flat_buttons.append(btn)
-
-            # Алмазы
-            for idx, button in enumerate(flat_buttons):
-                if button.text and self.diamond_emoji in button.text:
-                    try:
-                        await current_msg.click(idx)
-                        success_count += 1
-                        found = True
-                        await asyncio.sleep(click_delay)
-                        break
-                    except Exception:
-                        continue
-
-            if found:
-                continue
-
-            # Камни
-            for idx, button in enumerate(flat_buttons):
-                if button.text and self.stone_emoji in button.text:
-                    try:
-                        await current_msg.click(idx)
-                        success_count += 1
-                        found = True
-                        await asyncio.sleep(click_delay)
-                        break
-                    except Exception:
-                        continue
-
-            if not found:
-                break
-
-        return success_count
-
-    async def shaft_cycle(self) -> bool:
-        """Один цикл шахты"""
-        logger.info("[ШАХТА] Начинаем цикл")
-
-        msg = await self.shaft_send_message()
-        if not msg:
-            return False
-
-        # Ждем кнопку "Спуститься"
-        descent_msg = None
-        for _ in range(self.shaft_timeout):
-            descent_msg = await self.get_message_with_buttons(after_id=msg.id)
-            if descent_msg:
-                if await self.shaft_find_descent_button(descent_msg):
-                    break
-            await asyncio.sleep(1)
-
-        if not descent_msg:
-            return False
-
-        # Ждем сообщение с ресурсами
-        resources_msg = None
-        for _ in range(self.shaft_timeout):
-            candidate = await self.get_message_with_buttons(after_id=descent_msg.id)
-            if candidate and candidate.id != descent_msg.id and candidate.reply_markup:
-                resources_msg = candidate
-                break
-            await asyncio.sleep(1)
-
-        if not resources_msg:
-            return False
-
-        await self.shaft_click_resources(resources_msg)
-        return True
-
-    async def shaft_loop(self):
-        """Бесконечный цикл шахты"""
-        self.shaft_stats['start_time'] = time.time()
-        cycle_count = 0
-
-        while self.shaft_running:
-            try:
-                cycle_count += 1
-                self.shaft_stats['cycles'] = cycle_count
-                logger.info(f"[ШАХТА] === Цикл #{cycle_count} ===")
-
-                start = time.time()
-                await self.shaft_cycle()
-                self.shaft_stats['last_duration'] = time.time() - start
-
-                self.shaft_stats['next_time'] = time.time() + self.shaft_interval
-                await asyncio.sleep(self.shaft_interval)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[ШАХТА] Ошибка: {e}")
-                await asyncio.sleep(self.shaft_interval)
-
-    # ==================== МЕТОДЫ РЫБАЛКИ ====================
-
-    async def fishing_send_message(self) -> Optional[Message]:
-        """Отправка сообщения 'Рыбалка'"""
-        try:
-            message = await self.client.send_message(self.chat_id, "Рыбалка")
-            logger.info("[РЫБАЛКА] Сообщение отправлено")
-            return message
-        except Exception as e:
-            logger.error(f"[РЫБАЛКА] Ошибка: {e}")
-            return None
-
-    async def fishing_click_button(self, message: Message, target_text: str) -> bool:
-        """Нажать кнопку по тексту"""
-        try:
-            if not message or not message.reply_markup:
-                return False
-
-            buttons = []
-            for row in message.buttons:
-                for btn in row:
-                    buttons.append(btn)
-
-            for idx, btn in enumerate(buttons):
-                if hasattr(btn, 'text') and btn.text and target_text.lower() in btn.text.lower():
-                    await message.click(idx)
-                    await asyncio.sleep(1)
-                    return True
-            return False
-        except Exception as e:
-            logger.error(f"[РЫБАЛКА] Ошибка: {e}")
-            return False
-
-    async def fishing_click_emoji(self, message: Message) -> bool:
-        """Подсечка рыбы (нажать на появившийся эмодзи)"""
-        try:
-            if not message or not message.reply_markup:
-                return False
-
-            buttons = []
-            for row in message.buttons:
-                for btn in row:
-                    buttons.append(btn)
-
-            for idx, btn in enumerate(buttons):
-                if hasattr(btn, 'text') and btn.text:
-                    for emoji in self.fishing_emojis:
-                        if emoji in btn.text:
-                            delay = random.uniform(self.fishing_delay_min, self.fishing_delay_max)
-                            await asyncio.sleep(delay)
-                            await message.click(idx)
-                            await asyncio.sleep(1)
-                            return True
-            return False
-        except Exception as e:
-            logger.error(f"[РЫБАЛКА] Ошибка: {e}")
-            return False
-
-    async def fishing_cycle(self) -> bool:
-        """Один цикл рыбалки"""
-        logger.info("[РЫБАЛКА] Начинаем цикл")
-
-        msg = await self.fishing_send_message()
-        if not msg:
-            return False
-
-        # Ждем меню и нажимаем "Рыбачить"
-        menu_msg = None
-        for _ in range(self.fishing_timeout):
-            menu_msg = await self.get_message_with_buttons(after_id=msg.id)
-            if menu_msg:
-                break
-            await asyncio.sleep(1)
-
-        if not menu_msg:
-            return False
-
-        if not await self.fishing_click_button(menu_msg, "рыбачить"):
-            return False
-
-        # Ждем сетку
-        grid_msg = None
-        for _ in range(self.fishing_timeout):
-            grid_msg = await self.get_message_with_buttons(after_id=menu_msg.id)
-            if grid_msg and "закинули удочку" in grid_msg.text.lower():
-                break
-            await asyncio.sleep(1)
-
-        if not grid_msg:
-            return False
-
-        # Ждем поклевку
-        max_wait = 15
-        start_wait = time.time()
-
-        while time.time() - start_wait < max_wait:
-            current_msg = await self.client.get_messages(self.chat_id, ids=grid_msg.id)
-            if current_msg and current_msg.reply_markup:
-                if await self.fishing_click_emoji(current_msg):
-                    await asyncio.sleep(3)
-                    return True
-            await asyncio.sleep(0.3)
-
-        return False
-
-    async def fishing_loop(self):
-        """Бесконечный цикл рыбалки"""
-        self.fishing_stats['start_time'] = time.time()
-        cycle_count = 0
-
-        while self.fishing_running:
-            try:
-                cycle_count += 1
-                self.fishing_stats['cycles'] = cycle_count
-                logger.info(f"[РЫБАЛКА] === Цикл #{cycle_count} ===")
-
-                start = time.time()
-                await self.fishing_cycle()
-                self.fishing_stats['last_duration'] = time.time() - start
-
-                interval = random.uniform(self.fishing_interval_min, self.fishing_interval_max)
-                self.fishing_stats['next_time'] = time.time() + interval
-                await asyncio.sleep(interval)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[РЫБАЛКА] Ошибка: {e}")
-                await asyncio.sleep(60)
-
-    # ==================== МЕТОДЫ РАБОТЫ ====================
-
-    async def work_send_message(self) -> Optional[Message]:
-        """Отправка сообщения 'Работать'"""
-        try:
-            message = await self.client.send_message(self.chat_id, "Работать")
-            logger.info("[РАБОТА] Сообщение отправлено")
-            return message
-        except Exception as e:
-            logger.error(f"[РАБОТА] Ошибка: {e}")
-            return None
-
-    def work_extract_emoji(self, text: str) -> Optional[str]:
-        """Извлечь смайлик из текста (между « »)"""
-        pattern = r'«([^»]+)»'
-        matches = re.findall(pattern, text)
-        return matches[0].strip() if matches else None
-
-    def work_is_completed(self, text: str) -> bool:
-        """Проверить завершение смены"""
-        keywords = ["смена завершена", "зарплата", "следующая смена"]
-        return any(k in text.lower() for k in keywords)
-
-    async def work_click_emoji(self, message: Message, target_emoji: str) -> bool:
-        """Нажать кнопку с нужным смайликом"""
-        try:
-            if not message or not message.reply_markup:
-                return False
-
-            buttons = []
-            for row in message.buttons:
-                for btn in row:
-                    buttons.append(btn)
-
-            for idx, btn in enumerate(buttons):
-                if hasattr(btn, 'text') and btn.text and target_emoji in btn.text:
-                    await message.click(idx)
-                    await asyncio.sleep(self.work_click_delay)
-                    return True
-            return False
-        except Exception as e:
-            logger.error(f"[РАБОТА] Ошибка: {e}")
-            return False
-
-    async def work_cycle(self) -> bool:
-        """Один цикл работы"""
-        logger.info("[РАБОТА] Начинаем цикл")
-
-        msg = await self.work_send_message()
-        if not msg:
-            return False
-
-        # Получаем сообщение от бота
-        current_msg = None
-        for _ in range(self.work_timeout):
-            current_msg = await self.get_message_with_buttons(after_id=msg.id)
-            if current_msg:
-                break
-            await asyncio.sleep(1)
-
-        if not current_msg:
-            return False
-
-        # Цикл выполнения заданий
-        for _ in range(20):
-            try:
-                current_msg = await self.client.get_messages(self.chat_id, ids=current_msg.id)
-                if not current_msg or not current_msg.text:
-                    break
-
-                if self.work_is_completed(current_msg.text):
-                    return True
-
-                target_emoji = self.work_extract_emoji(current_msg.text)
-                if not target_emoji:
-                    await asyncio.sleep(2)
-                    continue
-
-                if await self.work_click_emoji(current_msg, target_emoji):
-                    await asyncio.sleep(2)
-                    next_msg = await self.get_message_with_buttons(after_id=current_msg.id)
-                    if next_msg:
-                        current_msg = next_msg
-                else:
-                    await asyncio.sleep(2)
-
-            except Exception as e:
-                logger.error(f"[РАБОТА] Ошибка: {e}")
-                break
-
-        return False
-
-    async def work_loop(self):
-        """Бесконечный цикл работы"""
-        self.work_stats['start_time'] = time.time()
-        cycle_count = 0
-
-        while self.work_running:
-            try:
-                cycle_count += 1
-                self.work_stats['cycles'] = cycle_count
-                logger.info(f"[РАБОТА] === Цикл #{cycle_count} ===")
-
-                start = time.time()
-                await self.work_cycle()
-                self.work_stats['last_duration'] = time.time() - start
-
-                self.work_stats['next_time'] = time.time() + self.work_interval
-                await asyncio.sleep(self.work_interval)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[РАБОТА] Ошибка: {e}")
-                await asyncio.sleep(self.work_interval)
-
-    # ==================== МЕТОДЫ РАНЧО (ПОИСК СЕМЯН) ====================
-
-    async def field_send_message(self) -> Optional[Message]:
-        """Отправка сообщения 'Ранчо' в ЛС с игровым ботом"""
-        try:
-            message = await self.client.send_message(self.game_bot_id, "Ранчо")
-            logger.info("[РАНЧО] Сообщение 'Ранчо' отправлено в ЛС")
-            return message
-        except Exception as e:
-            logger.error(f"[РАНЧО] Ошибка отправки: {e}")
-            return None
-
-    async def field_click_button(self, message: Message, target_text: str) -> bool:
-        """Нажать кнопку по тексту"""
-        try:
-            if not message or not message.reply_markup:
-                return False
-
-            buttons = []
-            for row in message.buttons:
-                for btn in row:
-                    buttons.append(btn)
-
-            button_texts = [btn.text for btn in buttons if hasattr(btn, 'text')]
-            logger.info(f"[РАНЧО] Доступные кнопки: {button_texts}")
-
-            for idx, btn in enumerate(buttons):
-                if hasattr(btn, 'text') and btn.text:
-                    btn_lower = btn.text.lower()
-                    if "поле" in btn_lower or "поиск семян" in btn_lower:
-                        logger.info(f"[РАНЧО] Найдена кнопка: {btn.text} (индекс {idx})")
-                        await message.click(idx)
-                        await asyncio.sleep(2)
-                        return True
-
-            logger.warning(f"[РАНЧО] Кнопка с текстом '{target_text}' не найдена")
-            return False
-        except Exception as e:
-            logger.error(f"[РАНЧО] Ошибка нажатия кнопки: {e}")
-            return False
-
-    async def field_wait_for_message_update(self, message_id: int, timeout: int = 30, check_text: str = None) -> \
-    Optional[Message]:
-        """Ожидать обновления сообщения"""
-        start_time = time.time()
-        last_text = None
-
-        while time.time() - start_time < timeout:
-            try:
-                # Получаем текущее сообщение
-                current_msg = await self.client.get_messages(self.game_bot_id, ids=message_id)
-
-                if current_msg and current_msg.text:
-                    # Если указан текст для проверки и он найден
-                    if check_text:
-                        if check_text in current_msg.text.lower():
-                            logger.info(f"[РАНЧО] Обнаружено обновление: {check_text}")
-                            return current_msg
-                    # Иначе ждем любого изменения текста
-                    elif last_text is not None and current_msg.text != last_text:
-                        logger.info("[РАНЧО] Обнаружено обновление сообщения")
-                        return current_msg
-
-                    last_text = current_msg.text
-
-            except Exception as e:
-                logger.error(f"[РАНЧО] Ошибка при проверке обновления: {e}")
-
-            await asyncio.sleep(1)
-
-        logger.warning(f"[РАНЧО] Таймаут ожидания обновления сообщения {message_id}")
-        return None
-
-    async def field_click_all_seeds(self, message: Message) -> int:
-        """Собрать все семена (нажать на все эмодзи в сетке)"""
-        success_count = 0
-
-        if not message.reply_markup:
-            logger.warning("[РАНЧО] В сообщении нет кнопок")
-            return 0
-
-        buttons = []
-        for row in message.buttons:
-            for btn in row:
-                buttons.append(btn)
-
-        logger.info(f"[РАНЧО] Всего кнопок в сетке: {len(buttons)}")
-
-        # Выводим все кнопки для отладки
-        for idx, btn in enumerate(buttons):
-            if hasattr(btn, 'text') and btn.text:
-                logger.info(f"[РАНЧО] Кнопка {idx}: '{btn.text}'")
-
-        # Ищем и нажимаем кнопки с эмодзи семян
-        for idx, btn in enumerate(buttons):
-            if hasattr(btn, 'text') and btn.text:
-                for emoji in self.seed_emojis:
-                    if emoji in btn.text:
-                        try:
-                            logger.info(f"[РАНЧО] Собираем: {btn.text} (индекс {idx})")
-                            await message.click(idx)
-                            success_count += 1
-                            await asyncio.sleep(self.field_click_delay)
-                            break
-                        except Exception as e:
-                            logger.error(f"[РАНЧО] Ошибка при сборе: {e}")
-
-        logger.info(f"[РАНЧО] Всего собрано семян: {success_count}")
-        return success_count
-
-    def field_extract_wait_time(self, text: str) -> Optional[int]:
-        """Извлечь время ожидания из текста (формат мм:сс)"""
-        # Ищем текст "через: 04:22"
-        pattern = r'через:\s*(\d+):(\d+)'
-        matches = re.findall(pattern, text)
-        if matches:
-            minutes = int(matches[0][0])
-            seconds = int(matches[0][1])
-            total_seconds = minutes * 60 + seconds + 10  # +10 сек запас
-            logger.info(f"[РАНЧО] Найдено время: {minutes}:{seconds:02d} -> ждем {total_seconds} сек")
-            return total_seconds
-
-        logger.warning("[РАНЧО] Время не найдено в тексте")
-        return None
-
-    async def field_cycle(self) -> bool:
-        """Один цикл поиска семян"""
-        logger.info("[РАНЧО] Начинаем цикл поиска семян")
-
-        # Отправляем "Ранчо" в ЛС игровому боту
-        msg = await self.field_send_message()
-        if not msg:
-            return False
-
-        # Ждем меню ранчо
-        menu_msg = None
-        for _ in range(self.field_timeout):
-            menu_msg = await self.get_message_with_buttons(after_id=msg.id, use_game_bot=True)
-            if menu_msg and "меню ранчо" in menu_msg.text.lower():
-                logger.info("[РАНЧО] Меню ранчо получено")
-                break
-            await asyncio.sleep(1)
-
-        if not menu_msg:
-            logger.warning("[РАНЧО] Меню ранчо не получено")
-            return False
-
-        # Сохраняем ID сообщения
-        message_id = menu_msg.id
-
-        # Нажимаем кнопку "Поле [поиск семян]"
-        if not await self.field_click_button(menu_msg, "поле"):
-            logger.warning("[РАНЧО] Кнопка 'Поле' не найдена")
-            return False
-
-        # Ждем обновления сообщения (появится сетка)
-        logger.info("[РАНЧО] Ожидаем появления сетки...")
-        grid_msg = await self.field_wait_for_message_update(message_id, timeout=30, check_text="жмите на семена")
-
-        if not grid_msg:
-            logger.warning("[РАНЧО] Сетка с семенами не получена")
-            return False
-
-        logger.info("[РАНЧО] Сетка с семенами получена, начинаем сбор")
-
-        # Собираем все семена
-        collected = await self.field_click_all_seeds(grid_msg)
-        logger.info(f"[РАНЧО] Собрано семян: {collected}")
-
-        # Ждем следующего обновления сообщения (результат с временем)
-        logger.info("[РАНЧО] Ожидаем результат...")
-        result_msg = await self.field_wait_for_message_update(message_id, timeout=30, check_text="собрали семена")
-
-        if result_msg:
-            # Извлекаем время до следующего похода
-            wait_time = self.field_extract_wait_time(result_msg.text)
-            if wait_time:
-                logger.info(f"[РАНЧО] Следующий поход через {wait_time} сек")
-                self.field_stats['next_time'] = time.time() + wait_time
-                await asyncio.sleep(wait_time)
-            else:
-                # Если не нашли время, ждем стандартный интервал
-                wait_time = self.field_interval
-                self.field_stats['next_time'] = time.time() + wait_time
-                logger.info(f"[РАНЧО] Время не найдено, ждем {wait_time} сек")
-                await asyncio.sleep(wait_time)
-        else:
-            # Если не получили результат, ждем стандартный интервал
-            logger.info("[РАНЧО] Результат не получен")
-            await asyncio.sleep(self.field_interval)
-
-        return True
-
-    async def field_loop(self):
-        """Бесконечный цикл поиска семян"""
-        self.field_stats['start_time'] = time.time()
-        cycle_count = 0
-
-        while self.field_running:
-            try:
-                cycle_count += 1
-                self.field_stats['cycles'] = cycle_count
-                logger.info(f"[РАНЧО] === Цикл #{cycle_count} ===")
-
-                start = time.time()
-                await self.field_cycle()
-                self.field_stats['last_duration'] = time.time() - start
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"[РАНЧО] Ошибка: {e}")
-                await asyncio.sleep(60)
-
-    # ==================== УПРАВЛЕНИЕ ====================
-
-    def format_uptime(self, start_time):
-        """Форматирование времени работы"""
-        if not start_time:
-            return "0м"
-        uptime = time.time() - start_time
-        hours = int(uptime // 3600)
-        minutes = int((uptime % 3600) // 60)
-        if hours > 0:
-            return f"{hours}ч {minutes}м"
-        return f"{minutes}м"
-
-    def get_next_time(self, next_time):
-        """Время до следующего цикла"""
-        if not next_time:
-            return "—"
-        wait = max(0, next_time - time.time())
-        return f"{int(wait)}с"
-
-    async def get_status_text(self) -> str:
-        """Получить статус всех активностей"""
-        status_lines = ["📊 Статус активностей:"]
-
-        # Шахта
-        if self.shaft_running:
-            status_lines.append(f"├─ ⛏️ Шахта: ✅ работает")
-            status_lines.append(f"│  ├─ Циклов: {self.shaft_stats['cycles']}")
-            status_lines.append(f"│  ├─ Время работы: {self.format_uptime(self.shaft_stats['start_time'])}")
-            status_lines.append(f"│  └─ Следующий: {self.get_next_time(self.shaft_stats['next_time'])}")
-        else:
-            status_lines.append("├─ ⛏️ Шахта: ⏹️ остановлена")
-
-        # Рыбалка
-        if self.fishing_running:
-            status_lines.append(f"├─ 🎣 Рыбалка: ✅ работает")
-            status_lines.append(f"│  ├─ Циклов: {self.fishing_stats['cycles']}")
-            status_lines.append(f"│  ├─ Время работы: {self.format_uptime(self.fishing_stats['start_time'])}")
-            status_lines.append(f"│  └─ Следующий: {self.get_next_time(self.fishing_stats['next_time'])}")
-        else:
-            status_lines.append("├─ 🎣 Рыбалка: ⏹️ остановлена")
-
-        # Работа
-        if self.work_running:
-            status_lines.append(f"├─ 💼 Работа: ✅ работает")
-            status_lines.append(f"│  ├─ Циклов: {self.work_stats['cycles']}")
-            status_lines.append(f"│  ├─ Время работы: {self.format_uptime(self.work_stats['start_time'])}")
-            status_lines.append(f"│  └─ Следующий: {self.get_next_time(self.work_stats['next_time'])}")
-        else:
-            status_lines.append("├─ 💼 Работа: ⏹️ остановлена")
-
-        # Ранчо (поиск семян)
-        if self.field_running:
-            status_lines.append(f"└─ 🌾 Ранчо: ✅ работает")
-            status_lines.append(f"   ├─ Циклов: {self.field_stats['cycles']}")
-            status_lines.append(f"   ├─ Время работы: {self.format_uptime(self.field_stats['start_time'])}")
-            status_lines.append(f"   └─ Следующий: {self.get_next_time(self.field_stats['next_time'])}")
-        else:
-            status_lines.append("└─ 🌾 Ранчо: ⏹️ остановлено")
-
-        # Общее время работы бота
-        if self.bot_start_time:
-            status_lines.append(f"\n⏱️ Бот работает: {self.format_uptime(self.bot_start_time)}")
-
-        return "\n".join(status_lines)
-
-    async def start_shaft(self) -> bool:
-        """Запуск шахты"""
-        if self.shaft_running:
-            return False
-        self.shaft_running = True
-        self.shaft_task = asyncio.create_task(self.shaft_loop())
-        logger.info("⛏️ Шахта запущена")
-        return True
-
-    async def stop_shaft(self) -> bool:
-        """Остановка шахты"""
-        if not self.shaft_running:
-            return False
-        self.shaft_running = False
-        if self.shaft_task:
-            self.shaft_task.cancel()
-            self.shaft_task = None
-        logger.info("⛏️ Шахта остановлена")
-        return True
-
-    async def start_fishing(self) -> bool:
-        """Запуск рыбалки"""
-        if self.fishing_running:
-            return False
-        self.fishing_running = True
-        self.fishing_task = asyncio.create_task(self.fishing_loop())
-        logger.info("🎣 Рыбалка запущена")
-        return True
-
-    async def stop_fishing(self) -> bool:
-        """Остановка рыбалки"""
-        if not self.fishing_running:
-            return False
-        self.fishing_running = False
-        if self.fishing_task:
-            self.fishing_task.cancel()
-            self.fishing_task = None
-        logger.info("🎣 Рыбалка остановлена")
-        return True
-
-    async def start_work(self) -> bool:
-        """Запуск работы"""
-        if self.work_running:
-            return False
-        self.work_running = True
-        self.work_task = asyncio.create_task(self.work_loop())
-        logger.info("💼 Работа запущена")
-        return True
-
-    async def stop_work(self) -> bool:
-        """Остановка работы"""
-        if not self.work_running:
-            return False
-        self.work_running = False
-        if self.work_task:
-            self.work_task.cancel()
-            self.work_task = None
-        logger.info("💼 Работа остановлена")
-        return True
-
-    async def start_field(self) -> bool:
-        """Запуск поиска семян"""
-        if self.field_running:
-            return False
-        self.field_running = True
-        self.field_task = asyncio.create_task(self.field_loop())
-        logger.info("🌾 Поиск семян запущен")
-        return True
-
-    async def stop_field(self) -> bool:
-        """Остановка поиска семян"""
-        if not self.field_running:
-            return False
-        self.field_running = False
-        if self.field_task:
-            self.field_task.cancel()
-            self.field_task = None
-        logger.info("🌾 Поиск семян остановлен")
-        return True
-
-    # ==================== ОБРАБОТЧИК КОМАНД ====================
+        await self.client.start(phone=config.PHONE_NUMBER)
+        logger.info("✅ Авторизован")
+        me = await self.client.get_me()
+        self.my_id = me.id
+        logger.info(f"👤 {me.first_name} (@{me.username})")
+        self._init_modules()
+
+    def _init_modules(self):
+        if config.SHAFT_ENABLED:
+            self.modules['shaft'] = ShaftModule(self.client, self.my_id)
+        if config.FISHING_ENABLED:
+            self.modules['fishing'] = FishingModule(self.client, self.my_id)
+        if config.WORK_ENABLED:
+            self.modules['work'] = WorkModule(self.client, self.my_id)
+        if config.FIELD_ENABLED:
+            self.modules['field'] = FieldModule(self.client, self.my_id)
+        if config.GARDEN_ENABLED:
+            self.modules['garden'] = GardenModule(self.client, self.my_id)
+        if config.RACE_ENABLED:
+            self.modules['race'] = RaceModule(self.client, self.my_id)
+        logger.info(f"📦 Модулей: {len(self.modules)}")
 
     async def setup_handlers(self):
-        """Настройка обработчиков сообщений"""
-
         @self.client.on(events.NewMessage)
-        async def message_handler(event):
-            # Проверяем, что сообщение либо из группы Farm, либо из ЛС с игровым ботом
-            if event.chat_id != self.chat_id and event.chat_id != self.game_bot_id:
+        async def handler(event):
+            if event.chat_id not in [config.GROUP_CHAT_ID, config.PRIVATE_CHAT_ID]:
                 return
-
-            text = event.message.text if event.message.text else ""
+            text = (event.message.text or "").lower().strip()
             if not text:
                 return
 
-            text_lower = text.lower().strip()
-
-            # Список допустимых команд (только их обрабатываем)
-            valid_commands = [
-                '/shaft', 'шах',
-                '/sshaft', 'сшах',
-                '/fishing', 'рыб',
-                '/sfishing', 'срыб',
-                '/work', 'раб',
-                '/swork', 'сраб',
-                '/field', 'поле',
-                '/sfield', 'споле',
-                '/status', 'стат'
-            ]
-
-            # Если это не команда - игнорируем
-            if text_lower not in valid_commands:
-                return
-
-            logger.info(f"Получена команда: {text_lower} (чат: {event.chat_id})")
-
             # Шахта
-            if text_lower in ['/shaft', 'шах']:
-                success = await self.start_shaft()
-                response = "✅ Шахта запущена!" if success else "⚠️ Шахта уже работает!"
-                await event.reply(response)
-
-            elif text_lower in ['/sshaft', 'сшах']:
-                success = await self.stop_shaft()
-                response = "⏹️ Шахта остановлена!" if success else "⚠️ Шахта не работает!"
-                await event.reply(response)
+            if text in config.COMMANDS['shaft_start']:
+                ok = await self.modules.get('shaft', type('', (), {
+                    'start': lambda s: False})()).start() if 'shaft' in self.modules else False
+                await event.reply("✅ Шахта запущена!" if ok else "⚠️ Не найдена!")
+            elif text in config.COMMANDS['shaft_stop']:
+                ok = await self.modules.get('shaft', type('', (), {
+                    'stop': lambda s: False})()).stop() if 'shaft' in self.modules else False
+                await event.reply("⏹️ Остановлена!" if ok else "⚠️ Не работает!")
 
             # Рыбалка
-            elif text_lower in ['/fishing', 'рыб']:
-                success = await self.start_fishing()
-                response = "🎣 Рыбалка запущена!" if success else "⚠️ Рыбалка уже работает!"
-                await event.reply(response)
-
-            elif text_lower in ['/sfishing', 'срыб']:
-                success = await self.stop_fishing()
-                response = "⏹️ Рыбалка остановлена!" if success else "⚠️ Рыбалка не работает!"
-                await event.reply(response)
+            elif text in config.COMMANDS['fishing_start']:
+                ok = await self.modules.get('fishing', type('', (), {
+                    'start': lambda s: False})()).start() if 'fishing' in self.modules else False
+                await event.reply("🎣 Рыбалка запущена!" if ok else "⚠️ Не найдена!")
+            elif text in config.COMMANDS['fishing_stop']:
+                ok = await self.modules.get('fishing', type('', (), {
+                    'stop': lambda s: False})()).stop() if 'fishing' in self.modules else False
+                await event.reply("⏹️ Остановлена!" if ok else "⚠️ Не работает!")
 
             # Работа
-            elif text_lower in ['/work', 'раб']:
-                success = await self.start_work()
-                response = "💼 Работа запущена!" if success else "⚠️ Работа уже работает!"
-                await event.reply(response)
+            elif text in config.COMMANDS['work_start']:
+                ok = await self.modules.get('work', type('', (), {
+                    'start': lambda s: False})()).start() if 'work' in self.modules else False
+                await event.reply("💼 Работа запущена!" if ok else "⚠️ Не найдена!")
+            elif text in config.COMMANDS['work_stop']:
+                ok = await self.modules.get('work', type('', (), {
+                    'stop': lambda s: False})()).stop() if 'work' in self.modules else False
+                await event.reply("⏹️ Остановлена!" if ok else "⚠️ Не работает!")
 
-            elif text_lower in ['/swork', 'сраб']:
-                success = await self.stop_work()
-                response = "⏹️ Работа остановлена!" if success else "⚠️ Работа не работает!"
-                await event.reply(response)
+            # Поле
+            elif text in config.COMMANDS['field_start']:
+                ok = await self.modules.get('field', type('', (), {
+                    'start': lambda s: False})()).start() if 'field' in self.modules else False
+                await event.reply("🌾 Поле запущено!" if ok else "⚠️ Не найдено!")
+            elif text in config.COMMANDS['field_stop']:
+                ok = await self.modules.get('field', type('', (), {
+                    'stop': lambda s: False})()).stop() if 'field' in self.modules else False
+                await event.reply("⏹️ Остановлено!" if ok else "⚠️ Не работает!")
 
-            # Ранчо
-            elif text_lower in ['/field', 'поле']:
-                success = await self.start_field()
-                response = "🌾 Поиск семян запущен!" if success else "⚠️ Поиск семян уже работает!"
-                await event.reply(response)
+            # Грядки
+            elif text in config.COMMANDS['garden_start']:
+                ok = await self.modules.get('garden', type('', (), {
+                    'start': lambda s: False})()).start() if 'garden' in self.modules else False
+                await event.reply("🌱 Грядки запущены!" if ok else "⚠️ Не найдены!")
+            elif text in config.COMMANDS['garden_stop']:
+                ok = await self.modules.get('garden', type('', (), {
+                    'stop': lambda s: False})()).stop() if 'garden' in self.modules else False
+                await event.reply("⏹️ Остановлены!" if ok else "⚠️ Не работают!")
 
-            elif text_lower in ['/sfield', 'споле']:
-                success = await self.stop_field()
-                response = "⏹️ Поиск семян остановлен!" if success else "⚠️ Поиск семян не работает!"
-                await event.reply(response)
+            # Гонки
+            elif text in config.COMMANDS['race_start']:
+                ok = await self.modules.get('race', type('', (), {
+                    'start': lambda s: False})()).start() if 'race' in self.modules else False
+                await event.reply("🏁 Гонки запущены!" if ok else "⚠️ Не найдены!")
+            elif text in config.COMMANDS['race_stop']:
+                ok = await self.modules.get('race', type('', (), {
+                    'stop': lambda s: False})()).stop() if 'race' in self.modules else False
+                await event.reply("⏹️ Остановлены!" if ok else "⚠️ Не идут!")
 
             # Статус
-            elif text_lower in ['/status', 'стат']:
-                status_text = await self.get_status_text()
-                await event.reply(status_text)
+            elif text in config.COMMANDS['status']:
+                await event.reply(self._get_status())
 
-    # ==================== ЗАПУСК ====================
+    def _get_status(self) -> str:
+        lines = ["📊 СТАТУС БОТА", "=" * 40]
+        info = {
+            'shaft': ('⛏️ Шахта', 'Группа'),
+            'fishing': ('🎣 Рыбалка', 'Группа'),
+            'work': ('💼 Работа', 'Группа'),
+            'field': ('🌾 Поле', 'ЛС'),
+            'garden': ('🌱 Грядки', 'ЛС'),
+            'race': ('🏁 Гонки', 'Группа'),
+        }
+        for key in info:
+            if key in self.modules:
+                s = self.modules[key].get_status()
+                name, chat = info[key]
+                icon = "✅" if s['running'] else "⏹️"
+                lines.append(f"{icon} {name} ({chat})")
+                lines.append(f"   ├─ Циклов: {s['cycles']}")
+                lines.append(f"   ├─ Время: {s['uptime']}")
+                lines.append(f"   ├─ Успех: {s['success']}")
+                lines.append(f"   └─ Ошибки: {s['fail']}")
+                lines.append("")
+            else:
+                name, chat = info.get(key, (key, '?'))
+                lines.append(f"⏸️ {name} ({chat}) — отключен")
+                lines.append("")
+        if self.start_time:
+            m = int((time.time() - self.start_time) / 60)
+            lines.append(f"⏱️ Бот работает: {m} минут")
+        return "\n".join(lines)
 
     async def run(self):
-        """Запуск бота"""
         try:
             await self.start_client()
             await self.setup_handlers()
-
-            self.bot_start_time = time.time()
+            self.start_time = time.time()
 
             logger.info("=" * 50)
-            logger.info("🤖 Универсальный бот готов!")
+            logger.info("🤖 УНИВЕРСАЛЬНЫЙ БОТ ГОТОВ!")
+            logger.info(f"👤 {config.PHONE_NUMBER}")
+            logger.info(f"💬 Группа: {config.GROUP_CHAT_ID}")
+            logger.info(f"💬 ЛС: {config.PRIVATE_CHAT_ID}")
             logger.info("")
-            logger.info("Команды:")
-            logger.info("  шах /shaft     - запустить шахту")
-            logger.info("  сшах /sshaft   - остановить шахту")
-            logger.info("  рыб /fishing   - запустить рыбалку")
-            logger.info("  срыб /sfishing - остановить рыбалку")
-            logger.info("  раб /work      - запустить работу")
-            logger.info("  сраб /swork    - остановить работу")
-            logger.info("  поле /field    - запустить поиск семян")
-            logger.info("  споле /sfield  - остановить поиск семян")
-            logger.info("  стат /status   - показать статус")
+            logger.info("📋 Команды:")
+            logger.info("  ⛏️  шах /shaft     - шахта")
+            logger.info("  🎣  рыб /fishing   - рыбалка")
+            logger.info("  💼  раб /work      - работа")
+            logger.info("  🌾  поле /field    - поиск семян")
+            logger.info("  🌱  гряд /garden   - грядки")
+            logger.info("  🏁  гон /race      - гонки")
+            logger.info("  📊  стат /stat     - статус")
             logger.info("=" * 50)
 
             await self.client.run_until_disconnected()
-
         except KeyboardInterrupt:
-            logger.info("Получен сигнал прерывания")
-            await self.stop_shaft()
-            await self.stop_fishing()
-            await self.stop_work()
-            await self.stop_field()
+            logger.info("⏹️ Остановка")
+            for m in self.modules.values():
+                await m.stop()
         except Exception as e:
-            logger.error(f"Критическая ошибка: {e}", exc_info=True)
+            logger.error(f"❌ Ошибка: {e}", exc_info=True)
         finally:
             await self.client.disconnect()
-            logger.info("Бот остановлен")
 
 
 def main():
-    """Главная функция"""
     bot = UniversalBot()
     try:
         asyncio.run(bot.run())
     except KeyboardInterrupt:
-        logger.info("Приложение остановлено пользователем")
+        logger.info("Остановлено")
     except Exception as e:
-        logger.error(f"Необработанное исключение: {e}", exc_info=True)
+        logger.error(f"Ошибка: {e}", exc_info=True)
         sys.exit(1)
 
 
