@@ -54,6 +54,6 @@ FISH_DATA = [
     {"emoji": "🐋", "name": "Синий кит", "weight_range": (100000, 190000), "price_range": (30, 30), "rarity": "Мифическая", "chance": 2.5},
 ]
 
-# Шансы свитка (20%)
-SCROLL_CHANCE = 20
-MAX_SCROLLS = 30
+# Шансы свитка (5%)
+SCROLL_CHANCE = 5
+MAX_SCROLLS = 25
