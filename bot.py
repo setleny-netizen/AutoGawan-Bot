@@ -16,7 +16,7 @@ from telegram.ext import (
 )
 
 # Импорт данных о рыбах из отдельного файла
-from fish_data import FISH_DATA, SCROLL_CHANCE, MAX_SCROLLS
+from fish_data import FISH_DATA, SCROLL_CHANCE
 
 # ==================== ЦВЕТА ДЛЯ ЛОГОВ ====================
 GREEN = "\033[92m"
@@ -29,6 +29,10 @@ RESET = "\033[0m"
 # ==================== КОНФИГУРАЦИЯ ====================
 TOKEN = "8742043015:AAF4EBWameQbc_qTZGlU347-A-R7shrK5GI"
 SAVE_FILE = "fishing_data.json"
+
+# Глобальный лимит свитков
+MAX_TOTAL_SCROLLS = 30
+total_scrolls_dropped = 0  # сколько свитков уже выпало за всё время
 
 # ==================== УРОВНИ (опыт до следующего уровня) ====================
 LEVEL_EXP_REQUIREMENTS = {1: 12, 2: 24, 3: 36, 4: 48, 5: 60}
@@ -80,30 +84,43 @@ def log_event(event_type: str, user_id: int, user_name: str, details: str = "", 
 
 # ==================== СОХРАНЕНИЕ И ЗАГРУЗКА ДАННЫХ ====================
 def save_data() -> None:
-    """Сохраняет user_data в JSON файл"""
+    """Сохраняет user_data и глобальные переменные в JSON файл"""
+    global total_scrolls_dropped
     try:
-        to_save = {str(k): v for k, v in user_data.items()}
+        to_save = {
+            "users": {str(k): v for k, v in user_data.items()},
+            "total_scrolls_dropped": total_scrolls_dropped
+        }
         with open(SAVE_FILE, 'w', encoding='utf-8') as f:
             json.dump(to_save, f, ensure_ascii=False, indent=2)
-        log_event("SAVE", 0, "SYSTEM", f"Данные сохранены ({len(user_data)} игроков)", CYAN)
+        log_event("SAVE", 0, "SYSTEM", f"Данные сохранены ({len(user_data)} игроков, свитков: {total_scrolls_dropped}/{MAX_TOTAL_SCROLLS})", CYAN)
     except Exception as e:
         print(f"Ошибка сохранения: {e}")
 
 
 def load_data() -> None:
-    """Загружает user_data из JSON файла"""
-    global user_data
+    """Загружает user_data и глобальные переменные из JSON файла"""
+    global user_data, total_scrolls_dropped
     if os.path.exists(SAVE_FILE):
         try:
             with open(SAVE_FILE, 'r', encoding='utf-8') as f:
                 loaded = json.load(f)
-                user_data = {int(k): v for k, v in loaded.items()}
-            log_event("LOAD", 0, "SYSTEM", f"Данные загружены ({len(user_data)} игроков)", CYAN)
+                # Загружаем пользователей
+                if "users" in loaded:
+                    user_data = {int(k): v for k, v in loaded["users"].items()}
+                else:
+                    # Обратная совместимость со старым форматом
+                    user_data = {int(k): v for k, v in loaded.items()}
+                # Загружаем глобальный счётчик свитков
+                total_scrolls_dropped = loaded.get("total_scrolls_dropped", 0)
+            log_event("LOAD", 0, "SYSTEM", f"Данные загружены ({len(user_data)} игроков, свитков: {total_scrolls_dropped}/{MAX_TOTAL_SCROLLS})", CYAN)
         except Exception as e:
             print(f"Ошибка загрузки: {e}")
             user_data = {}
+            total_scrolls_dropped = 0
     else:
         user_data = {}
+        total_scrolls_dropped = 0
         log_event("LOAD", 0, "SYSTEM", "Файл сохранения не найден, создан новый", CYAN)
 
 
@@ -129,6 +146,12 @@ def init_user(user_id: int, first_name: str) -> None:
             },
             "scrolls": 0,
             "fish_records": {},
+            "biggest_catch": {
+                "name": "",
+                "weight": 0.0,
+                "rarity": "",
+                "emoji": ""
+            }
         }
         log_event("NEW_USER", user_id, first_name, f"Зарегистрирован, GameID: {game_id}", GREEN)
         save_data()
@@ -252,7 +275,7 @@ def are_all_upgrades_maxed(user_id: int) -> bool:
     upgrades = user["upgrades"]
     return (upgrades["rod"] == 5 and upgrades["line"] == 5 and
             upgrades["float"] == 5 and upgrades["hook"] == 5 and
-            upgrades["reel"] == 5 and user["scrolls"] == MAX_SCROLLS)
+            upgrades["reel"] == 5)
 
 
 # ==================== КЛАВИАТУРЫ ====================
@@ -269,10 +292,8 @@ def get_fishing_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🎣 Рыбачить", callback_data="start_fishing_new")],
         [InlineKeyboardButton("📦 Склад", callback_data="show_inventory")],
         [InlineKeyboardButton("📖 Книга рыбака", callback_data="fish_album")],
+        [InlineKeyboardButton("🪝 Улучшения", callback_data="show_upgrades")],
     ]
-
-    if not are_all_upgrades_maxed(user_id):
-        keyboard.append([InlineKeyboardButton("🪝 Улучшения", callback_data="show_upgrades")])
 
     return InlineKeyboardMarkup(keyboard)
 
@@ -285,14 +306,24 @@ def get_inventory_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_upgrades_keyboard() -> InlineKeyboardMarkup:
+def get_upgrades_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для главного меню улучшений (ведёт на информационные окна)"""
+    user = user_data[user_id]
+    upgrades = user["upgrades"]
+    
+    # Формируем текст для каждой кнопки с уровнем
+    rod_text = f"🎣 Удилище ({upgrades['rod']}/5)" if upgrades['rod'] < 5 else "🎣 Удилище ✅"
+    line_text = f"📏 Леска ({upgrades['line']}/5)" if upgrades['line'] < 5 else "📏 Леска ✅"
+    float_text = f"🎯 Поплавок ({upgrades['float']}/5)" if upgrades['float'] < 5 else "🎯 Поплавок ✅"
+    hook_text = f"🪝 Крючок ({upgrades['hook']}/5)" if upgrades['hook'] < 5 else "🪝 Крючок ✅"
+    reel_text = f"⚙️ Катушка ({upgrades['reel']}/5)" if upgrades['reel'] < 5 else "⚙️ Катушка ✅"
+    
     keyboard = [
-        [InlineKeyboardButton("🎣 Удилище", callback_data="info_rod")],
-        [InlineKeyboardButton("🎯 Поплавок", callback_data="info_float"),
-         InlineKeyboardButton("⚙️ Катушка", callback_data="info_reel")],
-        [InlineKeyboardButton("🪝 Крючок", callback_data="info_hook"),
-         InlineKeyboardButton("📏 Леска", callback_data="info_line")],
+        [InlineKeyboardButton(rod_text, callback_data="info_rod")],
+        [InlineKeyboardButton(float_text, callback_data="info_float"),
+         InlineKeyboardButton(reel_text, callback_data="info_reel")],
+        [InlineKeyboardButton(hook_text, callback_data="info_hook"),
+         InlineKeyboardButton(line_text, callback_data="info_line")],
         [InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -489,15 +520,30 @@ async def show_fishing_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user = user_data[user_id]
 
     level, exp, exp_needed = get_level_exp(user_id)
-
+    
+    # Базовый текст меню
     menu_text = (
         f"🎣 {user['name']} | Меню рыбалки:\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⭐️ Уровень рыбака: {level} ({exp}/{exp_needed})\n"
-        f"🐟 Поймано всего рыбы: {user['total_fish_caught']} шт.\n\n"
-        f"📜 Свиток улучшения: {user['scrolls']} шт.\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━"
+        f"🐟 Поймано всего рыбы: {user['total_fish_caught']} шт.\n"
     )
+    
+    # Добавляем строку со свитками только если не все улучшения на максимуме
+    if not are_all_upgrades_maxed(user_id):
+        menu_text += f"\n📜 Свиток улучшения: {user['scrolls']} шт.\n"
+    
+    menu_text += f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Добавляем блок крупнейшего улова
+    biggest = user.get("biggest_catch", {})
+    if biggest and biggest.get("weight", 0) > 0:
+        menu_text += (
+            f"🏆 Крупнейший улов:\n"
+            f"⠀{biggest['emoji']} {biggest['name']} ({biggest['weight']:.2f} кг., {biggest['rarity']})"
+        )
+    else:
+        menu_text += "🏆 Крупнейший улов:\n⠀Пока нет улова"
 
     await update.message.reply_text(
         menu_text,
@@ -535,8 +581,10 @@ async def show_fish_album(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if not fish_records:
         text = (
-            f"📖 {user['name']}, ваша книга рыбака пуста.\n\n"
-            f"🎣 Отправляйтесь на рыбалку, чтобы поймать первую рыбу!"
+            f"📙 {user['name']}, это ваша Книга рыбака\n\n"
+            f"Здесь хранится вся история вашей добычи:\n"
+            f"🎣 Сколько и какой рыбы вы поймали за всё время.\n\n"
+            f"❌ Пока что книга пуста. Отправляйтесь на рыбалку!"
         )
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")]
@@ -574,8 +622,11 @@ async def show_album_page(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     start_idx = page * items_per_page
     end_idx = min(start_idx + items_per_page, len(fish_list))
 
-    text = f"{user['name']}, Ваша книга рыбака"
-    f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    text = (
+        f"📙 {user['name']}, это ваша Книга рыбака\n\n"
+        f"Здесь хранится вся история вашей добычи:\n"
+        f"🎣 Сколько и какой рыбы вы поймали за всё время."
+    )
 
     keyboard = []
     for fish_name in fish_list[start_idx:end_idx]:
@@ -648,10 +699,9 @@ async def show_fish_details(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     total_count = record.get("total_count", 0)
 
     text = (
-        f"{user['name']}, тут находится информация о пойманой рыбе:\n\n"
+        f"{user['name']}, тут находится информация о пойманой рыбе:\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{emoji} {fish_name} ({rarity})\n"
-        f"📦 Всего поймано - {total_weight:.2f} кг ({total_count} шт.)\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
 
     medals = ["🥇", "🥈", "🥉"]
@@ -659,8 +709,9 @@ async def show_fish_details(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         text += f"{medals[i]}{catch['weight']:.2f} кг - {catch['date']}\n"
 
     text += (
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📦 Всего поймано - {total_weight:.2f} кг ({total_count} шт.)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🎣 Продолжайте рыбачить чтобы поймать самую крупную особь в мире!"
     )
 
@@ -768,7 +819,7 @@ async def show_upgrades_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     await query.edit_message_text(
         text,
-        reply_markup=get_upgrades_keyboard()
+        reply_markup=get_upgrades_keyboard(user_id)
     )
 
 
@@ -805,7 +856,6 @@ async def handle_upgrade_action(update: Update, context: ContextTypes.DEFAULT_TY
 
     current_level = user["upgrades"][upgrade_type]
     upgrade_name = UPGRADE_NAMES[upgrade_type]
-    upgrade_emoji = get_upgrade_emoji(upgrade_type)
 
     # Проверяем максимальный уровень
     if current_level >= 5:
@@ -832,6 +882,7 @@ async def handle_upgrade_action(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Обновляем информационное окно
     description = UPGRADE_DESCRIPTIONS[upgrade_type]
+    upgrade_emoji = get_upgrade_emoji(upgrade_type)
 
     text = (
         f"🪝 {user['name']}, информация об улучшении:\n\n"
@@ -933,14 +984,29 @@ async def back_to_fishing_menu(update: Update, context: ContextTypes.DEFAULT_TYP
 
     level, exp, exp_needed = get_level_exp(user_id)
 
+    # Базовый текст меню
     menu_text = (
         f"🎣 {user['name']} | Меню рыбалки:\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⭐️ Уровень рыбака: {level} ({exp}/{exp_needed})\n"
         f"🐟 Поймано всего рыбы: {user['total_fish_caught']} шт.\n"
-        f"📜 Свиток улучшения: {user['scrolls']} шт.\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
+    
+    # Добавляем строку со свитками только если не все улучшения на максимуме
+    if not are_all_upgrades_maxed(user_id):
+        menu_text += f"\n📜 Свиток улучшения: {user['scrolls']} шт.\n"
+    
+    menu_text += f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    
+    # Добавляем блок крупнейшего улова
+    biggest = user.get("biggest_catch", {})
+    if biggest and biggest.get("weight", 0) > 0:
+        menu_text += (
+            f"🏆 Крупнейший улов:\n"
+            f"⠀{biggest['emoji']} {biggest['name']} ({biggest['weight']:.2f} кг., {biggest['rarity']})"
+        )
+    else:
+        menu_text += "🏆 Крупнейший улов:\n⠀Пока нет улова"
 
     await query.edit_message_text(
         menu_text,
@@ -1092,6 +1158,23 @@ async def handle_catch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     user["inventory"].append(caught_fish)
 
+    # Обновляем крупнейший улов
+    if "biggest_catch" not in user:
+        user["biggest_catch"] = {
+            "name": "",
+            "weight": 0.0,
+            "rarity": "",
+            "emoji": ""
+        }
+    
+    if caught_fish["weight"] > user["biggest_catch"]["weight"]:
+        user["biggest_catch"] = {
+            "name": caught_fish["name"],
+            "weight": caught_fish["weight"],
+            "rarity": caught_fish["rarity"],
+            "emoji": caught_fish["emoji"]
+        }
+
     # Добавляем запись в книгу рыбака
     if "fish_records" not in user:
         user["fish_records"] = {}
@@ -1123,12 +1206,18 @@ async def handle_catch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     leveled_up = add_exp(user_id, 1)
 
+    # Проверяем выпадение свитка (глобальный лимит)
+    global total_scrolls_dropped
     scroll_dropped = False
-    if random.randint(1, 100) <= SCROLL_CHANCE and user["scrolls"] < MAX_SCROLLS:
+    if random.randint(1, 100) <= SCROLL_CHANCE and total_scrolls_dropped < MAX_TOTAL_SCROLLS:
         user["scrolls"] += 1
+        total_scrolls_dropped += 1
         scroll_dropped = True
+        log_event("SCROLL_DROPPED", user_id, user["name"],
+                  f"Найден свиток! Всего выпало: {total_scrolls_dropped}/{MAX_TOTAL_SCROLLS}",
+                  GREEN)
 
-    scroll_info = f"ДА ({user['scrolls']}/{MAX_SCROLLS})" if scroll_dropped else "Нет"
+    scroll_info = f"ДА ({user['scrolls']} шт.)" if scroll_dropped else "Нет"
     log_event("FISH_CAUGHT", user_id, user["name"],
               f"Рыба: {fish_name}, Вес: {caught_fish['weight']:.2f} кг, Цена: {caught_fish['total_price']:.2f}$, Свиток: {scroll_info}",
               GREEN)
