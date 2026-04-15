@@ -31,12 +31,12 @@ TOKEN = "8742043015:AAF4EBWameQbc_qTZGlU347-A-R7shrK5GI"
 SAVE_FILE = "fishing_data.json"
 
 # Глобальный лимит свитков
-MAX_TOTAL_SCROLLS = 30
+MAX_TOTAL_SCROLLS = 25
 total_scrolls_dropped = 0  # сколько свитков уже выпало за всё время
 
 # ==================== УРОВНИ (опыт до следующего уровня) ====================
 LEVEL_EXP_REQUIREMENTS = {1: 12, 2: 24, 3: 36, 4: 48, 5: 60}
-for i in range(6, 101):
+for i in range(6, 151):
     LEVEL_EXP_REQUIREMENTS[i] = LEVEL_EXP_REQUIREMENTS[i - 1] + 12
 
 # ==================== ХРАНИЛИЩЕ ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ ====================
@@ -93,7 +93,9 @@ def save_data() -> None:
         }
         with open(SAVE_FILE, 'w', encoding='utf-8') as f:
             json.dump(to_save, f, ensure_ascii=False, indent=2)
-        log_event("SAVE", 0, "SYSTEM", f"Данные сохранены ({len(user_data)} игроков, свитков: {total_scrolls_dropped}/{MAX_TOTAL_SCROLLS})", CYAN)
+        log_event("SAVE", 0, "SYSTEM",
+                  f"Данные сохранены ({len(user_data)} игроков, свитков: {total_scrolls_dropped}/{MAX_TOTAL_SCROLLS})",
+                  CYAN)
     except Exception as e:
         print(f"Ошибка сохранения: {e}")
 
@@ -111,9 +113,39 @@ def load_data() -> None:
                 else:
                     # Обратная совместимость со старым форматом
                     user_data = {int(k): v for k, v in loaded.items()}
+
+                # Миграция старых данных — добавляем отсутствующие поля
+                for uid, data in user_data.items():
+                    if "nets" not in data:
+                        data["nets"] = {
+                            "active_nets": [],
+                            "max_nets": 3,
+                            "used_nets": 0,
+                            "net_duration": 1200
+                        }
+                    if "biggest_catch" not in data:
+                        data["biggest_catch"] = {
+                            "name": "",
+                            "weight": 0.0,
+                            "rarity": "",
+                            "emoji": ""
+                        }
+                    if "fish_records" not in data:
+                        data["fish_records"] = {}
+                    if "scrolls" not in data:
+                        data["scrolls"] = 0
+                    if "upgrades" not in data:
+                        data["upgrades"] = {
+                            "rod": 0, "line": 0, "float": 0, "hook": 0, "reel": 0
+                        }
+                    if "unique_fish_caught" not in data:
+                        data["unique_fish_caught"] = []
+
                 # Загружаем глобальный счётчик свитков
                 total_scrolls_dropped = loaded.get("total_scrolls_dropped", 0)
-            log_event("LOAD", 0, "SYSTEM", f"Данные загружены ({len(user_data)} игроков, свитков: {total_scrolls_dropped}/{MAX_TOTAL_SCROLLS})", CYAN)
+            log_event("LOAD", 0, "SYSTEM",
+                      f"Данные загружены ({len(user_data)} игроков, свитков: {total_scrolls_dropped}/{MAX_TOTAL_SCROLLS})",
+                      CYAN)
         except Exception as e:
             print(f"Ошибка загрузки: {e}")
             user_data = {}
@@ -151,7 +183,14 @@ def init_user(user_id: int, first_name: str) -> None:
                 "weight": 0.0,
                 "rarity": "",
                 "emoji": ""
-            }
+            },
+            "nets": {
+                "active_nets": [],
+                "max_nets": 3,
+                "used_nets": 0,
+                "net_duration": 1200
+            },
+            "unique_fish_caught": []
         }
         log_event("NEW_USER", user_id, first_name, f"Зарегистрирован, GameID: {game_id}", GREEN)
         save_data()
@@ -165,7 +204,7 @@ def get_level_exp(user_id: int) -> Tuple[int, int, int]:
     return level, exp, exp_needed
 
 
-def add_exp(user_id: int, amount: int) -> bool:
+async def add_exp(user_id: int, amount: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     user = user_data[user_id]
     old_level = user["level"]
     user["exp"] += amount
@@ -185,6 +224,20 @@ def add_exp(user_id: int, amount: int) -> bool:
                   f"Уровень: {old_level} → {user['level']}, Опыт: {user['exp']}/{LEVEL_EXP_REQUIREMENTS.get(user['level'], 12 * user['level'])}",
                   CYAN)
         save_data()
+
+        # Отправляем сообщение с картинкой о повышении уровня
+        try:
+            with open("img/lvlup.jpg", "rb") as photo:
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo,
+                    caption=f"🎉 Поздравляем! Вы достигли {user['level']} уровня! 🎉"
+                )
+        except FileNotFoundError:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"🎉 Поздравляем! Вы достигли {user['level']} уровня! 🎉"
+            )
 
     return leveled_up
 
@@ -208,13 +261,23 @@ def get_bite_time_range(user_id: int) -> Tuple[float, float]:
     return min_time, max_time
 
 
+def get_net_bite_time(user_id: int) -> float:
+    """Возвращает интервал появления рыбы для сетей (30-60 сек) с учётом улучшений"""
+    min_time, max_time = get_bite_time_range(user_id)
+    return random.uniform(min_time, max_time)
+
+
 def get_reaction_time(user_id: int) -> float:
     user = user_data[user_id]
     reel_level = user["upgrades"]["reel"]
     return 2 * (1.1487 ** reel_level)
 
 
-def get_available_fish(user_id: int) -> List[Dict]:
+def get_available_fish(user_id: int, check_max_weight: bool = True) -> List[Dict]:
+    """Возвращает список доступных рыб. Если check_max_weight=False, возвращает всех рыб."""
+    if not check_max_weight:
+        return [fish.copy() for fish in FISH_DATA]
+
     max_weight = get_max_weight(user_id)
     available = []
 
@@ -229,8 +292,9 @@ def get_available_fish(user_id: int) -> List[Dict]:
     return available
 
 
-def get_random_fish(user_id: int) -> Optional[Dict[str, Any]]:
-    available_fish = get_available_fish(user_id)
+def get_random_fish(user_id: int, check_max_weight: bool = True) -> Optional[Dict[str, Any]]:
+    """Генерирует случайную рыбу. Если check_max_weight=False, не ограничивает по весу."""
+    available_fish = get_available_fish(user_id, check_max_weight)
     total_chance = sum(fish["chance"] for fish in available_fish)
     rand = random.uniform(0, total_chance)
     cumulative = 0
@@ -288,36 +352,57 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_fishing_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    user = user_data[user_id]
+    level = user["level"]
+
+    # Кнопка рыбалки сетями (заблокирована до 7 уровня)
+    if level >= 7:
+        net_button = InlineKeyboardButton("🕸 Рыбачить сетями", callback_data="start_net_fishing")
+    else:
+        net_button = InlineKeyboardButton("🔒 Рыбачить сетями (7 ур.)", callback_data="net_locked")
+
     keyboard = [
         [InlineKeyboardButton("🎣 Рыбачить", callback_data="start_fishing_new")],
-        [InlineKeyboardButton("📦 Склад", callback_data="show_inventory")],
+        [net_button],
+        [InlineKeyboardButton("🪝 Улучшения", callback_data="show_upgrades"),
+         InlineKeyboardButton("📦 Склад", callback_data="show_inventory")],
         [InlineKeyboardButton("📖 Книга рыбака", callback_data="fish_album")],
-        [InlineKeyboardButton("🪝 Улучшения", callback_data="show_upgrades")],
     ]
 
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_inventory_keyboard() -> InlineKeyboardMarkup:
-    keyboard = [
-        [InlineKeyboardButton("💰 Продать рыбу", callback_data="sell_fish")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")],
-    ]
+def get_inventory_keyboard(is_empty: bool = False) -> InlineKeyboardMarkup:
+    """Клавиатура для склада"""
+    if is_empty:
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")]]
+    else:
+        keyboard = [
+            [InlineKeyboardButton("💰 Продать рыбу", callback_data="sell_fish")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")],
+        ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def get_back_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура только с кнопкой Назад"""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")]
+    ])
 
 
 def get_upgrades_keyboard(user_id: int) -> InlineKeyboardMarkup:
     """Клавиатура для главного меню улучшений (ведёт на информационные окна)"""
     user = user_data[user_id]
     upgrades = user["upgrades"]
-    
+
     # Формируем текст для каждой кнопки с уровнем
     rod_text = f"🎣 Удилище ({upgrades['rod']}/5)" if upgrades['rod'] < 5 else "🎣 Удилище ✅"
     line_text = f"📏 Леска ({upgrades['line']}/5)" if upgrades['line'] < 5 else "📏 Леска ✅"
     float_text = f"🎯 Поплавок ({upgrades['float']}/5)" if upgrades['float'] < 5 else "🎯 Поплавок ✅"
     hook_text = f"🪝 Крючок ({upgrades['hook']}/5)" if upgrades['hook'] < 5 else "🪝 Крючок ✅"
     reel_text = f"⚙️ Катушка ({upgrades['reel']}/5)" if upgrades['reel'] < 5 else "⚙️ Катушка ✅"
-    
+
     keyboard = [
         [InlineKeyboardButton(rod_text, callback_data="info_rod")],
         [InlineKeyboardButton(float_text, callback_data="info_float"),
@@ -339,17 +424,17 @@ def get_upgrade_info_keyboard(upgrade_type: str) -> InlineKeyboardMarkup:
 
 
 def get_catch_result_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для сообщения о поимке — только кнопка Рыбачить"""
     keyboard = [
-        [InlineKeyboardButton("🎣 Рыбачить", callback_data="start_fishing_new")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")],
+        [InlineKeyboardButton("🎣 Рыбачить", callback_data="start_fishing_new")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
 
 def get_fail_keyboard() -> InlineKeyboardMarkup:
+    """Клавиатура для сообщения о неудаче — только кнопка Рыбачить"""
     keyboard = [
-        [InlineKeyboardButton("🎣 Рыбачить", callback_data="start_fishing_new")],
-        [InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")],
+        [InlineKeyboardButton("🎣 Рыбачить", callback_data="start_fishing_new")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -383,11 +468,43 @@ def create_fishing_grid(fish_emoji: Optional[str] = None,
     return InlineKeyboardMarkup(keyboard)
 
 
+def create_net_grid(active_positions: List[int]) -> InlineKeyboardMarkup:
+    """Создаёт сетку 5x5 для рыбалки сетями"""
+    keyboard = []
+    for i in range(5):
+        row = []
+        for j in range(5):
+            pos = i * 5 + j
+            if pos in active_positions:
+                button_text = "🕸"
+                callback_data = f"net_check_{pos}"
+            else:
+                button_text = " "
+                callback_data = f"net_place_{pos}"
+
+            row.append(InlineKeyboardButton(button_text, callback_data=callback_data))
+        keyboard.append(row)
+
+    # Добавляем кнопку "Назад" под сеткой
+    keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_to_fishing_menu")])
+
+    return InlineKeyboardMarkup(keyboard)
+
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 def is_user_fishing(context: ContextTypes.DEFAULT_TYPE) -> bool:
     if not context.user_data.get("fishing_message_id"):
         return False
     if context.user_data.get("fishing_ended", True):
+        return False
+    return True
+
+
+def is_user_net_fishing(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Проверяет, активна ли рыбалка сетями"""
+    if not context.user_data.get("net_message_id"):
+        return False
+    if context.user_data.get("net_fishing_ended", True):
         return False
     return True
 
@@ -437,6 +554,44 @@ def reset_fishing_state(context: ContextTypes.DEFAULT_TYPE) -> None:
             del context.user_data[key]
 
 
+def reset_net_fishing_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Сбрасывает состояние рыбалки сетями"""
+    keys_to_clear = [
+        "net_message_id",
+        "net_chat_id",
+        "net_fishing_ended",
+        "net_fishing_active",
+    ]
+    for key in keys_to_clear:
+        if key in context.user_data:
+            del context.user_data[key]
+
+
+def update_net_message(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    """Обновляет сообщение с сеткой и текстом"""
+    if not context.user_data.get("net_message_id"):
+        return
+
+    user = user_data[user_id]
+    nets = user["nets"]
+    active_positions = [net["position"] for net in nets["active_nets"]]
+
+    text = (
+        f"🕸 {user['name']}, рыбалка сетями:\n"
+        f"Доступно сетей: {nets['used_nets']}/{nets['max_nets']} забросов\n\n"
+        f"🎯 Заброс сети ловит несколько рыб сразу.\n"
+        f"🚩 Нажмите на пустую ячейку, чтобы установить сеть.\n"
+        f"⏳ Нажмите на установленную сеть, чтобы узнать, сколько времени она еще будет собирать улов."
+    )
+
+    asyncio.create_task(context.bot.edit_message_text(
+        chat_id=context.user_data["net_chat_id"],
+        message_id=context.user_data["net_message_id"],
+        text=text,
+        reply_markup=create_net_grid(active_positions)
+    ))
+
+
 # ==================== ОБРАБОТЧИКИ КОМАНД ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
@@ -463,6 +618,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• Жди появления эмодзи рыбы в сетке 5×5\n"
         "• Успей нажать на неё за отведённое время\n"
         "• Пойманная рыба попадёт на склад\n\n"
+        "🕸 **Рыбалка сетями (доступна с 7 ур.):**\n"
+        "• Установи сеть в пустую ячейку\n"
+        "• Сеть работает 2 часа и ловит рыбу автоматически\n"
+        "• Максимум 3 сети одновременно\n\n"
         "📖 **Книга рыбака:**\n"
         "• Смотри рекорды по пойманным рыбам\n"
         "• Отслеживай свой прогресс\n\n"
@@ -520,21 +679,24 @@ async def show_fishing_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user = user_data[user_id]
 
     level, exp, exp_needed = get_level_exp(user_id)
-    
+    unique_count = len(user.get("unique_fish_caught", []))
+    total_unique = len(FISH_DATA)
+
     # Базовый текст меню
     menu_text = (
         f"🎣 {user['name']} | Меню рыбалки:\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⭐️ Уровень рыбака: {level} ({exp}/{exp_needed})\n"
         f"🐟 Поймано всего рыбы: {user['total_fish_caught']} шт.\n"
+        f"🌊 Уникальные виды: {unique_count} из {total_unique}\n"
     )
-    
+
     # Добавляем строку со свитками только если не все улучшения на максимуме
     if not are_all_upgrades_maxed(user_id):
         menu_text += f"\n📜 Свиток улучшения: {user['scrolls']} шт.\n"
-    
+
     menu_text += f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    
+
     # Добавляем блок крупнейшего улова
     biggest = user.get("biggest_catch", {})
     if biggest and biggest.get("weight", 0) > 0:
@@ -568,6 +730,257 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(profile_text)
 
 
+# ==================== РЫБАЛКА СЕТЯМИ ====================
+async def start_net_fishing(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Запускает рыбалку сетями"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    user = user_data[user_id]
+    nets = user["nets"]
+
+    # Проверяем, не активна ли уже рыбалка сетями
+    if is_user_net_fishing(context):
+        await query.answer("⚠️ Вы уже на рыбалке сетями!", show_alert=True)
+        return
+
+    # Проверяем, не активна ли обычная рыбалка
+    if is_user_fishing(context):
+        remaining_time = get_remaining_fishing_time(context)
+        await query.answer(f"⚠️ Сначала завершите обычную рыбалку! Осталось: {remaining_time} сек.", show_alert=True)
+        return
+
+    active_positions = [net["position"] for net in nets["active_nets"]]
+
+    text = (
+        f"🕸 {user['name']}, рыбалка сетями:\n"
+        f"Доступно сетей: {nets['used_nets']}/{nets['max_nets']} забросов\n\n"
+        f"🎯 Заброс сети ловит несколько рыб сразу.\n"
+        f"🚩 Нажмите на пустую ячейку, чтобы установить сеть.\n"
+        f"⏳ Нажмите на установленную сеть, чтобы узнать, сколько времени она еще будет собирать улов."
+    )
+
+    message = await query.message.reply_text(
+        text,
+        reply_markup=create_net_grid(active_positions)
+    )
+
+    context.user_data["net_message_id"] = message.message_id
+    context.user_data["net_chat_id"] = message.chat_id
+    context.user_data["net_fishing_ended"] = False
+    context.user_data["net_fishing_active"] = True
+
+    # Запускаем фоновую задачу для появления рыбы
+    asyncio.create_task(net_fishing_task(update, context))
+
+
+async def net_fishing_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Фоновая задача для появления рыбы при рыбалке сетями"""
+    user_id = update.effective_user.id
+    user = user_data[user_id]
+
+    while context.user_data.get("net_fishing_active", False):
+        bite_time = get_net_bite_time(user_id)
+        await asyncio.sleep(bite_time)
+
+        if not context.user_data.get("net_fishing_active", False):
+            break
+
+        nets = user["nets"]
+        if not nets["active_nets"]:
+            continue
+
+        # Генерируем рыбу в случайной позиции
+        current_fish = get_random_fish(user_id, check_max_weight=False)
+        position = random.randint(0, 24)
+
+        # Проверяем, есть ли сеть в этой позиции
+        for net in nets["active_nets"]:
+            if net["position"] == position:
+                # Добавляем рыбу в улов сети
+                net["catches"].append(current_fish)
+                log_event("NET_FISH", user_id, user["name"],
+                          f"Рыба попалась в сеть: {current_fish['name']}, Вес: {current_fish['weight']:.2f} кг, Позиция: {position}",
+                          BLUE)
+                break
+
+
+async def place_net(update: Update, context: ContextTypes.DEFAULT_TYPE, position: int) -> None:
+    """Устанавливает сеть в указанную позицию"""
+    query = update.callback_query
+    await query.answer()
+
+    user_id = update.effective_user.id
+    user = user_data[user_id]
+    nets = user["nets"]
+
+    # Проверяем лимит сетей
+    if nets["used_nets"] >= nets["max_nets"]:
+        await query.answer(f"❌ Достигнут лимит сетей ({nets['max_nets']})!", show_alert=True)
+        return
+
+    # Проверяем, нет ли уже сети в этой позиции
+    for net in nets["active_nets"]:
+        if net["position"] == position:
+            await query.answer("❌ В этой ячейке уже установлена сеть!", show_alert=True)
+            return
+
+    # Устанавливаем сеть
+    expire_time = time.time() + nets["net_duration"]
+    nets["active_nets"].append({
+        "position": position,
+        "expire_time": expire_time,
+        "catches": []
+    })
+    nets["used_nets"] += 1
+
+    log_event("NET_PLACE", user_id, user["name"],
+              f"Сеть установлена в позиции {position}, осталось сетей: {nets['used_nets']}/{nets['max_nets']}",
+              BLUE)
+
+    save_data()
+    update_net_message(context, user_id)
+
+
+async def check_net(update: Update, context: ContextTypes.DEFAULT_TYPE, position: int) -> None:
+    """Проверка состояния сети"""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    user = user_data[user_id]
+
+    # Ищем сеть на этой позиции
+    net = None
+    for n in user["nets"]["active_nets"]:
+        if n["position"] == position:
+            net = n
+            break
+
+    if not net:
+        await query.answer("❌ Здесь нет сети!", show_alert=True)
+        return
+
+    current_time = time.time()
+    expire_time = net["expire_time"]
+
+    if current_time >= expire_time:
+        # Время вышло — можно собрать улов
+        await collect_net_catch(update, context, position, net)
+    else:
+        # Показываем оставшееся время
+        remaining = int(expire_time - current_time)
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        seconds = remaining % 60
+
+        if hours > 0:
+            time_str = f"{hours} ч {minutes} мин"
+        elif minutes > 0:
+            time_str = f"{minutes} мин {seconds} сек"
+        else:
+            time_str = f"{seconds} сек"
+
+        await query.answer(f"⏳ Сеть будет работать ещё {time_str}", show_alert=True)
+
+
+async def collect_net_catch(update: Update, context: ContextTypes.DEFAULT_TYPE, position: int, net: Dict) -> None:
+    """Собирает улов с сети"""
+    query = update.callback_query
+
+    user_id = update.effective_user.id
+    user = user_data[user_id]
+    nets = user["nets"]
+
+    # Удаляем сеть
+    nets["active_nets"] = [n for n in nets["active_nets"] if n["position"] != position]
+    nets["used_nets"] -= 1
+
+    catches = net.get("catches", [])
+
+    if not catches:
+        await query.answer("📦 Сеть пуста, рыба не попалась.", show_alert=True)
+        save_data()
+        update_net_message(context, user_id)
+        return
+
+    # Группируем улов
+    fish_summary = {}
+    total_weight = 0.0
+
+    for fish in catches:
+        user["inventory"].append(fish)
+        user["total_fish_caught"] += 1
+
+        key = (fish["emoji"], fish["name"])
+        if key not in fish_summary:
+            fish_summary[key] = {"count": 0}
+        fish_summary[key]["count"] += 1
+        total_weight += fish["weight"]
+
+        # Обновляем книгу рыбака и крупнейший улов (без опыта)
+        if "fish_records" not in user:
+            user["fish_records"] = {}
+
+        fish_name = fish["name"]
+        if fish_name not in user["fish_records"]:
+            user["fish_records"][fish_name] = {
+                "emoji": fish["emoji"],
+                "rarity": fish["rarity"],
+                "catches": [],
+                "total_weight": 0.0,
+                "total_count": 0,
+                "max_weight": 0.0,
+                "max_weight_date": ""
+            }
+
+        record = user["fish_records"][fish_name]
+        catch_date = datetime.now().strftime("%d.%m.%y %H:%M")
+        record["catches"].append({
+            "weight": fish["weight"],
+            "date": catch_date
+        })
+        record["total_weight"] += fish["weight"]
+        record["total_count"] += 1
+
+        if fish["weight"] > record["max_weight"]:
+            record["max_weight"] = fish["weight"]
+            record["max_weight_date"] = catch_date
+
+        # Обновляем крупнейший улов
+        if "biggest_catch" not in user:
+            user["biggest_catch"] = {"name": "", "weight": 0.0, "rarity": "", "emoji": ""}
+
+        if fish["weight"] > user["biggest_catch"]["weight"]:
+            user["biggest_catch"] = {
+                "name": fish["name"],
+                "weight": fish["weight"],
+                "rarity": fish["rarity"],
+                "emoji": fish["emoji"]
+            }
+
+    # Формируем текст результата
+    result_text = (
+        f"🕸 {user['name']}, вы собрали улов с сети!\n\n"
+    )
+
+    for (emoji, name), data in fish_summary.items():
+        result_text += f"{emoji} {name}: {data['count']} шт.\n"
+
+    result_text += f"\nВсего поймано: {len(catches)} рыб, {total_weight:.2f} кг."
+
+    log_event("NET_COLLECT", user_id, user["name"],
+              f"Собрана сеть в позиции {position}, поймано: {len(catches)} рыб, {total_weight:.2f} кг",
+              GREEN)
+
+    save_data()
+
+    # Отправляем результат новым сообщением
+    await query.message.reply_text(result_text)
+
+    # Обновляем сетку
+    update_net_message(context, user_id)
+
+
 # ==================== КНИГА РЫБАКА ====================
 async def show_fish_album(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Показывает книгу рыбака с пагинацией"""
@@ -593,7 +1006,6 @@ async def show_fish_album(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     # Сохраняем данные в context для пагинации
-    # Сортируем список рыб по максимальному весу (от большего к меньшему)
     fish_with_max_weight = []
     for fish_name, record in fish_records.items():
         max_weight = record.get("max_weight", 0)
@@ -748,6 +1160,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer()
         await start_fishing_process_new_message(update, context)
 
+    elif data == "start_net_fishing":
+        await start_net_fishing(update, context)
+
+    elif data == "net_locked":
+        await query.answer("🔒 Рыбалка сетями станет доступна на 7 уровне!", show_alert=True)
+
+    elif data.startswith("net_place_"):
+        pos = int(data.replace("net_place_", ""))
+        await place_net(update, context, pos)
+
+    elif data.startswith("net_check_"):
+        pos = int(data.replace("net_check_", ""))
+        await check_net(update, context, pos)
+
     elif data == "show_inventory":
         await query.answer()
         await show_inventory(update, context)
@@ -788,6 +1214,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif data == "back_to_fishing_menu":
         await query.answer()
         reset_fishing_state(context)
+        reset_net_fishing_state(context)
         await back_to_fishing_menu(update, context)
 
     elif data.startswith("catch_"):
@@ -907,34 +1334,36 @@ async def show_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if not inventory:
         text = f"📦 {user['name']}, Ваш склад пуст. Отправляйтесь на рыбалку!"
-    else:
-        total_value = sum(fish["total_price"] for fish in inventory)
-        total_weight = sum(fish["weight"] for fish in inventory)
+        await query.edit_message_text(text, reply_markup=get_inventory_keyboard(is_empty=True))
+        return
 
-        fish_summary = {}
-        for fish in inventory:
-            key = (fish["emoji"], fish["name"])
-            if key not in fish_summary:
-                fish_summary[key] = {"total_weight": 0, "total_price": 0}
-            fish_summary[key]["total_weight"] += fish["weight"]
-            fish_summary[key]["total_price"] += fish["total_price"]
+    total_value = sum(fish["total_price"] for fish in inventory)
+    total_weight = sum(fish["weight"] for fish in inventory)
 
-        sorted_fish = sorted(fish_summary.items(), key=lambda x: x[1]["total_price"], reverse=True)
+    fish_summary = {}
+    for fish in inventory:
+        key = (fish["emoji"], fish["name"])
+        if key not in fish_summary:
+            fish_summary[key] = {"total_weight": 0, "total_price": 0}
+        fish_summary[key]["total_weight"] += fish["weight"]
+        fish_summary[key]["total_price"] += fish["total_price"]
 
-        text = f"📦 {user['name']}, Ваш склад:\n\n"
-        for (emoji, name), data in sorted_fish:
-            weight_str = f"{data['total_weight']:.2f}".rstrip('0').rstrip('.')
-            price_str = f"{data['total_price']:.2f}".rstrip('0').rstrip('.')
-            text += f"{emoji} {name}: {weight_str} кг. ({price_str}$)\n"
+    sorted_fish = sorted(fish_summary.items(), key=lambda x: x[1]["total_price"], reverse=True)
 
-        text += "\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        text += f"📊 Всего рыб: {len(inventory)} шт.\n"
-        text += f"⚖️ Всего рыбы: {format_number(total_weight)} кг.\n"
-        text += f"💰 Цена всех рыб: {format_number(total_value)}$"
+    text = f"📦 {user['name']}, Ваш склад:\n\n"
+    for (emoji, name), data in sorted_fish:
+        weight_str = f"{data['total_weight']:.2f}".rstrip('0').rstrip('.')
+        price_str = f"{data['total_price']:.2f}".rstrip('0').rstrip('.')
+        text += f"{emoji} {name}: {weight_str} кг. ({price_str}$)\n"
+
+    text += "\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    text += f"📊 Всего рыб: {len(inventory)} шт.\n"
+    text += f"⚖️ Всего рыбы: {format_number(total_weight)} кг.\n"
+    text += f"💰 Цена всех рыб: {format_number(total_value)}$"
 
     await query.edit_message_text(
         text,
-        reply_markup=get_inventory_keyboard()
+        reply_markup=get_inventory_keyboard(is_empty=False)
     )
 
 
@@ -948,7 +1377,7 @@ async def sell_all_fish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not inventory:
         await query.edit_message_text(
             "📦 Ваш склад пуст. Нечего продавать.",
-            reply_markup=get_fail_keyboard()
+            reply_markup=get_back_keyboard()
         )
         return
 
@@ -971,7 +1400,7 @@ async def sell_all_fish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     await query.edit_message_text(
         text,
-        reply_markup=get_fail_keyboard()
+        reply_markup=get_back_keyboard()
     )
 
 
@@ -981,8 +1410,11 @@ async def back_to_fishing_menu(update: Update, context: ContextTypes.DEFAULT_TYP
     user = user_data[user_id]
 
     reset_fishing_state(context)
+    reset_net_fishing_state(context)
 
     level, exp, exp_needed = get_level_exp(user_id)
+    unique_count = len(user.get("unique_fish_caught", []))
+    total_unique = len(FISH_DATA)
 
     # Базовый текст меню
     menu_text = (
@@ -990,14 +1422,15 @@ async def back_to_fishing_menu(update: Update, context: ContextTypes.DEFAULT_TYP
         f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"⭐️ Уровень рыбака: {level} ({exp}/{exp_needed})\n"
         f"🐟 Поймано всего рыбы: {user['total_fish_caught']} шт.\n"
+        f"🌊 Уникальные виды: {unique_count} из {total_unique}\n"
     )
-    
+
     # Добавляем строку со свитками только если не все улучшения на максимуме
     if not are_all_upgrades_maxed(user_id):
         menu_text += f"\n📜 Свиток улучшения: {user['scrolls']} шт.\n"
-    
+
     menu_text += f"━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    
+
     # Добавляем блок крупнейшего улова
     biggest = user.get("biggest_catch", {})
     if biggest and biggest.get("weight", 0) > 0:
@@ -1097,7 +1530,7 @@ async def fish_disappearance_task_new(update: Update, context: ContextTypes.DEFA
     log_event("FISH_FAIL", user_id, user["name"], f"Причина: не успел подсечь, Рыба: {fish_name}", RED)
 
     reset_fishing_state(context)
-    set_fishing_cooldown(user_id, 5)
+    set_fishing_cooldown(user_id, 0)
 
     await message.edit_text(
         f"😓 {user['name']}, вы не успели подсечь {fish_name}, она сорвалась с крючка и уплыла!",
@@ -1125,7 +1558,7 @@ async def handle_catch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         log_event("FISH_FAIL", user_id, user["name"], f"Причина: промах, Рыба: {fish_name}", RED)
 
         reset_fishing_state(context)
-        set_fishing_cooldown(user_id, 5)
+        set_fishing_cooldown(user_id, 0)
 
         await query.edit_message_text(
             f"😓 {user['name']}, вы не успели подсечь {fish_name}, она сорвалась с крючка и уплыла!",
@@ -1144,7 +1577,7 @@ async def handle_catch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         log_event("FISH_FAIL", user_id, user["name"], f"Причина: опоздал, Рыба: {fish_name}", RED)
 
         reset_fishing_state(context)
-        set_fishing_cooldown(user_id, 5)
+        set_fishing_cooldown(user_id, 0)
 
         await query.edit_message_text(
             f"😓 {user['name']}, вы не успели подсечь {fish_name}, она сорвалась с крючка и уплыла!",
@@ -1166,7 +1599,7 @@ async def handle_catch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "rarity": "",
             "emoji": ""
         }
-    
+
     if caught_fish["weight"] > user["biggest_catch"]["weight"]:
         user["biggest_catch"] = {
             "name": caught_fish["name"],
@@ -1174,6 +1607,13 @@ async def handle_catch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "rarity": caught_fish["rarity"],
             "emoji": caught_fish["emoji"]
         }
+
+    # Добавляем в уникальные виды
+    if caught_fish["rarity"] in ["Редкая", "Очень редкая", "Уникальная", "Легендарная", "Мифическая"]:
+        if "unique_fish_caught" not in user:
+            user["unique_fish_caught"] = []
+        if caught_fish["name"] not in user["unique_fish_caught"]:
+            user["unique_fish_caught"].append(caught_fish["name"])
 
     # Добавляем запись в книгу рыбака
     if "fish_records" not in user:
@@ -1204,7 +1644,7 @@ async def handle_catch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         record["max_weight"] = caught_fish["weight"]
         record["max_weight_date"] = catch_date
 
-    leveled_up = add_exp(user_id, 1)
+    leveled_up = await add_exp(user_id, 1, context)
 
     # Проверяем выпадение свитка (глобальный лимит)
     global total_scrolls_dropped
@@ -1223,7 +1663,7 @@ async def handle_catch(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
               GREEN)
 
     reset_fishing_state(context)
-    set_fishing_cooldown(user_id, 5)
+    set_fishing_cooldown(user_id, 0)
     save_data()
 
     catch_text = (
@@ -1260,7 +1700,7 @@ async def handle_miss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         log_event("FISH_FAIL", user_id, user["name"], f"Причина: промах (miss), Рыба: {fish_name}", RED)
 
         reset_fishing_state(context)
-        set_fishing_cooldown(user_id, 5)
+        set_fishing_cooldown(user_id, 0)
 
         await query.edit_message_text(
             f"😓 {user['name']}, вы не успели подсечь {fish_name}, она сорвалась с крючка и уплыла!",
